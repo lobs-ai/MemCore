@@ -19,6 +19,7 @@ import {
 import { MemCoreError } from "../errors.js";
 import { getLogger } from "../logging.js";
 import type { MemCore } from "../memcore.js";
+import type { IngestionProducer } from "../queue/producer.js";
 import { registerAddRoute } from "./routes/add.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerSearchRoute } from "./routes/search.js";
@@ -27,6 +28,13 @@ const logger = getLogger("api.server");
 
 export interface BuildServerOptions {
   memcore: MemCore;
+  /**
+   * Optional ingestion queue. When present, /v1/add enqueues and returns 202
+   * with `pending`. When absent, /v1/add runs ingestion synchronously inside
+   * the request and returns 202 with `complete`. SPEC contract is the same
+   * either way (202 + a status string).
+   */
+  producer?: IngestionProducer;
 }
 
 export function buildServer(opts: BuildServerOptions): FastifyInstance {
@@ -41,6 +49,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   app.register(sensible);
 
   app.decorate("memcore", opts.memcore);
+  app.decorate("producer", opts.producer ?? null);
 
   app.addHook("onRequest", async (req, reply) => {
     reply.header("x-request-id", req.id);
@@ -99,5 +108,6 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
 declare module "fastify" {
   interface FastifyInstance {
     memcore: MemCore;
+    producer: IngestionProducer | null;
   }
 }

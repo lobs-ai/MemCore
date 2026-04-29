@@ -44,6 +44,13 @@ export type {
   OpenAIEmbedderOptions,
   OpenAICompatibleEmbedderOptions,
 } from "./llm/openai-embedder.js";
+export { OpenAILLMClient, OpenAICompatibleLLMClient } from "./llm/openai-llm-client.js";
+export type {
+  OpenAILLMClientOptions,
+  OpenAICompatibleLLMClientOptions,
+} from "./llm/openai-llm-client.js";
+export { TrackedLLMClient } from "./llm/client.js";
+export { TrackedEmbedder } from "./llm/embedder.js";
 export { StubEmbedder } from "./llm/stub-embedder.js";
 export { CostTracker, type CostRecord } from "./llm/cost-tracker.js";
 
@@ -63,5 +70,7 @@ export {
   ProviderError,
 } from "./errors.js";
 
-// Retrieval result shape (what `search` returns inside `result.chunk`).
+// Retrieval result shapes.
 export type { ChunkHit } from "./retrieval/vector-search.js";
+export type { MemoryHit, ChunkRef } from "./retrieval/memory-search.js";
+export type { ExtractedMemory, MemoryCategory } from "./ingestion/extractor.js";

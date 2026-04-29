@@ -12,11 +12,17 @@
 --   messages        individual turns
 --   chunks          chunked source material with embeddings
 --
--- Phase 2 will add memories, memory_chunks, edges. They go in this same file.
+-- Phase 2 tables (added):
+--   memories        atomic facts extracted from chunks
+--   memory_chunks   many-to-many link memory ↔ source chunks
+--
+-- Phase 4 will add edges (typed memory→memory relationships).
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+DROP TABLE IF EXISTS memory_chunks CASCADE;
+DROP TABLE IF EXISTS memories CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
 DROP TABLE IF EXISTS messages CASCADE;
 DROP TABLE IF EXISTS conversations CASCADE;
@@ -88,3 +94,39 @@ CREATE TABLE chunks (
 CREATE INDEX ix_chunks_container_id ON chunks(container_id);
 CREATE INDEX ix_chunks_conversation_id ON chunks(conversation_id);
 CREATE INDEX ix_chunks_content_tsv ON chunks USING GIN (to_tsvector('english', content));
+
+-- memories: atomic, self-contained facts extracted from chunks. Search hits
+-- this table; raw chunks are joined back in for context. Like chunks, the
+-- embedding column is unbounded VECTOR — index strategy is deferred to
+-- pnpm db:vector-index (lands with hybrid search in Phase 3).
+--
+-- event_date and event_date_precision are populated starting in Phase 5
+-- (temporal grounding). Schema includes them now to avoid a re-reset later.
+CREATE TABLE memories (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  container_id          UUID NOT NULL REFERENCES containers(id) ON DELETE CASCADE,
+  content               TEXT NOT NULL,
+  embedding             VECTOR,
+  category              TEXT NOT NULL,
+  document_date         TIMESTAMPTZ,
+  event_date            TIMESTAMPTZ,
+  event_date_precision  TEXT,
+  status                TEXT NOT NULL DEFAULT 'active',
+  version               INTEGER NOT NULL DEFAULT 1,
+  confidence            REAL NOT NULL DEFAULT 1.0,
+  prompt_version        TEXT NOT NULL,
+  extractor_model       TEXT NOT NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX ix_memories_container_status ON memories(container_id, status);
+CREATE INDEX ix_memories_content_tsv ON memories USING GIN (to_tsvector('english', content));
+CREATE INDEX ix_memories_container_event_date ON memories(container_id, event_date);
+
+CREATE TABLE memory_chunks (
+  memory_id   UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  chunk_id    UUID NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+  relevance   REAL NOT NULL DEFAULT 1.0,
+  PRIMARY KEY (memory_id, chunk_id)
+);
+CREATE INDEX ix_memory_chunks_chunk_id ON memory_chunks(chunk_id);

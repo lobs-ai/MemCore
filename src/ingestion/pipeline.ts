@@ -1,26 +1,39 @@
 /**
- * Ingestion orchestration. Phase 1 is a thin synchronous pipeline.
+ * Ingestion orchestration.
  *
- * Phase 1 deliberately runs ingestion inline inside the request/SDK call:
- * chunk → embed → write. SPEC.md § Ingestion pipeline describes the full
- * async, session-scoped pipeline (chunking → contextualizing → extraction →
- * conflict detection → write); none of that exists yet. The simplest possible
- * inline version is the right baseline to measure later phases against.
+ * Phase 2 pipeline: chunk → embed chunks → extract memories per chunk →
+ * embed memories → write everything in one transaction. The unit is still a
+ * "session" (a conversation or a document); session boundary detection lives
+ * with the queue (see `queue/session-boundary.ts`).
  *
- * When Phase 2 lands (memory extraction) and Phase 3 lands (contextualizer +
- * hybrid search), this module grows into the orchestrator that SPEC describes.
- * At that point /v1/add and MemCore.add() enqueue work onto Redis/RQ instead
- * of calling these helpers directly.
+ * Stages:
+ *  1. Load / flatten input into a single text body.
+ *  2. Chunk (token-based fixed split — semantic chunking lands in Phase 3).
+ *  3. Embed chunks.
+ *  4. For each chunk, run the extractor LLM call. Most return [].
+ *  5. Embed all extracted memories in a single batched call.
+ *  6. Transactional write: conversations, messages, chunks, memories,
+ *     memory_chunks. Conversation is marked complete or failed.
+ *
+ * Conflict detection (Phase 4), contextual prefixes (Phase 3), and edges
+ * (Phase 4) are all out of scope. Memories are written as `status='active'`
+ * version 1 — the conflict detector will flip statuses later.
  */
 
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 
 import { vectorLiteral } from "../db/vector.js";
-import { EmbeddingError } from "../errors.js";
+import { EmbeddingError, IngestionError } from "../errors.js";
 import type { Embedder } from "../llm/embedder.js";
 import { getLogger } from "../logging.js";
 import { chunkText } from "./chunker.js";
+import {
+  EXTRACTION_PROMPT_VERSION,
+  type ExtractDeps,
+  type ExtractedMemory,
+  extractMemories,
+} from "./extractor.js";
 
 const logger = getLogger("ingestion.pipeline");
 
@@ -50,12 +63,19 @@ export interface IngestResult {
   conversationId: string;
   ingestionStatus: string;
   chunksWritten: number;
+  memoriesWritten: number;
 }
 
 export interface IngestDeps {
   sql: postgres.Sql;
   embedder: Embedder;
   chunkOptions: { targetTokens: number; minTokens: number };
+  /**
+   * Memory extractor configuration. When omitted, ingestion runs in chunk-
+   * only mode (Phase 1 behaviour) — useful for tests, fallback when no LLM
+   * is configured, or callers that want raw RAG.
+   */
+  extractor?: ExtractDeps;
 }
 
 function contentHash(text: string): string {
@@ -63,9 +83,6 @@ function contentHash(text: string): string {
 }
 
 function flattenMessages(messages: { role: string; content: string }[]): string {
-  // Phase 1: concatenate messages into one document for chunking. Real
-  // session-aware chunking lands in Phase 3. Until then, role prefixes
-  // preserve enough turn structure for naive vector search to work.
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
 }
 
@@ -80,16 +97,92 @@ async function getOrCreateContainer(
     RETURNING id, tag
   `;
   const row = rows[0];
-  if (!row) throw new Error(`container '${tag}' missing after upsert`);
+  if (!row) throw new IngestionError(`container '${tag}' missing after upsert`);
   return row;
+}
+
+interface ChunkPlan {
+  content: string;
+  position: number;
+  tokenCount: number;
+  hash: string;
+  vector: number[];
+  memories: ExtractedMemory[];
 }
 
 export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<IngestResult> {
   const text = args.messages ? flattenMessages(args.messages) : args.content;
+  const chunks = chunkText(text, deps.chunkOptions);
+
+  if (chunks.length === 0) {
+    return await deps.sql.begin(async (tx) => {
+      const container = await getOrCreateContainer(tx, args.containerTag);
+      const conv = await upsertConversation(tx, container.id, args, "complete", 0);
+      return {
+        conversationId: conv.id,
+        ingestionStatus: conv.ingestion_status,
+        chunksWritten: 0,
+        memoriesWritten: 0,
+      };
+    });
+  }
+
+  // Stage: embed chunks.
+  const chunkEmbeddings = await deps.embedder.embed({ texts: chunks.map((c) => c.content) });
+  if (chunkEmbeddings.vectors.length !== chunks.length) {
+    throw new EmbeddingError("embedder returned wrong number of vectors", {
+      expected: chunks.length,
+      got: chunkEmbeddings.vectors.length,
+    });
+  }
+
+  // Stage: extract memories per chunk.
+  // Run extractions in sequence to keep request rate predictable; the eval
+  // suite ingests dozens of cases and burst-fanout on Haiku tends to 429.
+  const plans: ChunkPlan[] = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    const chunk = chunks[i];
+    if (!chunk) continue;
+    const vector = chunkEmbeddings.vectors[i];
+    if (!vector) throw new EmbeddingError("missing chunk vector", { index: i });
+    const memories = deps.extractor
+      ? await extractMemoriesSafely(deps.extractor, chunk.content)
+      : [];
+    plans.push({
+      content: chunk.content,
+      position: chunk.position,
+      tokenCount: chunk.tokenCount,
+      hash: contentHash(chunk.content),
+      vector,
+      memories,
+    });
+  }
+
+  // Stage: embed memories in one call.
+  const flatMemories: { planIdx: number; memory: ExtractedMemory }[] = [];
+  for (let i = 0; i < plans.length; i += 1) {
+    const plan = plans[i];
+    if (!plan) continue;
+    for (const m of plan.memories) flatMemories.push({ planIdx: i, memory: m });
+  }
+  let memoryVectors: number[][] = [];
+  if (flatMemories.length > 0) {
+    const memoryEmbeddings = await deps.embedder.embed({
+      texts: flatMemories.map((m) => m.memory.content),
+    });
+    if (memoryEmbeddings.vectors.length !== flatMemories.length) {
+      throw new EmbeddingError("embedder returned wrong number of memory vectors", {
+        expected: flatMemories.length,
+        got: memoryEmbeddings.vectors.length,
+      });
+    }
+    memoryVectors = memoryEmbeddings.vectors;
+  }
+
+  // Stage: transactional write.
   return await deps.sql.begin(async (tx) => {
     const container = await getOrCreateContainer(tx, args.containerTag);
 
-    // Idempotency: re-adding the same external_id is a no-op.
     if (args.externalId) {
       const existing = await tx<ConversationRow[]>`
         SELECT id, container_id, external_id, ingestion_status
@@ -102,24 +195,18 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
           conversationId: existing[0].id,
           ingestionStatus: existing[0].ingestion_status,
           chunksWritten: 0,
+          memoriesWritten: 0,
         };
       }
     }
 
-    const conv = await tx<ConversationRow[]>`
-      INSERT INTO conversations (
-        container_id, external_id, message_count, ingestion_status, metadata
-      ) VALUES (
-        ${container.id},
-        ${args.externalId ?? null},
-        ${args.messages?.length ?? 0},
-        'processing',
-        ${tx.json(JSON.parse(JSON.stringify(args.metadata ?? {})))}
-      )
-      RETURNING id, container_id, external_id, ingestion_status
-    `;
-    const conversation = conv[0];
-    if (!conversation) throw new Error("conversation insert returned no row");
+    const conversation = await upsertConversation(
+      tx,
+      container.id,
+      args,
+      "processing",
+      args.messages?.length ?? 0,
+    );
 
     if (args.messages?.length) {
       const rows = args.messages.map((m, position) => ({
@@ -133,61 +220,61 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       `;
     }
 
-    const chunks = chunkText(text, deps.chunkOptions);
-    if (chunks.length === 0) {
-      await tx`
-        UPDATE conversations
-        SET ingestion_status = 'complete', ingested_at = NOW()
-        WHERE id = ${conversation.id}
-      `;
-      return {
-        conversationId: conversation.id,
-        ingestionStatus: "complete",
-        chunksWritten: 0,
-      };
-    }
-
-    const embeddings = await deps.embedder.embed({ texts: chunks.map((c) => c.content) });
-    if (embeddings.vectors.length !== chunks.length) {
-      throw new EmbeddingError("embedder returned wrong number of vectors", {
-        expected: chunks.length,
-        got: embeddings.vectors.length,
-      });
-    }
-
-    // Bulk insert with one round trip. We render the embedding as a pgvector
-    // literal because postgres.js doesn't let us mix tagged-template arrays
-    // and JSON bulk-insert in a single statement.
-    const chunkRows = chunks.map((c, i) => {
-      const vector = embeddings.vectors[i];
-      if (!vector) throw new EmbeddingError("missing vector for chunk", { index: i });
-      return {
-        container_id: container.id,
-        conversation_id: conversation.id,
-        source_type: args.sourceType,
-        source_id: args.externalId ?? null,
-        content: c.content,
-        embedding: vectorLiteral(vector),
-        content_hash: contentHash(c.content),
-        position: c.position,
-        document_date: args.documentDate ?? null,
-        metadata: { tokenCount: c.tokenCount },
-      };
-    });
-
-    for (const row of chunkRows) {
-      await tx`
+    // Chunks. Insert and capture ids so we can link memory_chunks.
+    const chunkIds: (string | null)[] = new Array(plans.length).fill(null);
+    for (let i = 0; i < plans.length; i += 1) {
+      const plan = plans[i];
+      if (!plan) continue;
+      const inserted = await tx<{ id: string }[]>`
         INSERT INTO chunks (
           container_id, conversation_id, source_type, source_id, content,
           embedding, content_hash, position, document_date, metadata
         ) VALUES (
-          ${row.container_id}, ${row.conversation_id}, ${row.source_type},
-          ${row.source_id}, ${row.content}, ${row.embedding}::vector,
-          ${row.content_hash}, ${row.position}, ${row.document_date},
-          ${tx.json(JSON.parse(JSON.stringify(row.metadata)))}
+          ${container.id}, ${conversation.id}, ${args.sourceType},
+          ${args.externalId ?? null}, ${plan.content},
+          ${vectorLiteral(plan.vector)}::vector,
+          ${plan.hash}, ${plan.position}, ${args.documentDate ?? null},
+          ${tx.json({ tokenCount: plan.tokenCount } as never)}
         )
-        ON CONFLICT (container_id, content_hash) DO NOTHING
+        ON CONFLICT (container_id, content_hash) DO UPDATE
+          SET content_hash = EXCLUDED.content_hash
+        RETURNING id
       `;
+      chunkIds[i] = inserted[0]?.id ?? null;
+    }
+
+    // Memories.
+    let memoriesWritten = 0;
+    const extractorModel = deps.extractor?.model ?? "none";
+    for (let m = 0; m < flatMemories.length; m += 1) {
+      const entry = flatMemories[m];
+      const vector = memoryVectors[m];
+      if (!entry || !vector) continue;
+      const sourceChunkId = chunkIds[entry.planIdx];
+      if (!sourceChunkId) continue;
+      const inserted = await tx<{ id: string }[]>`
+        INSERT INTO memories (
+          container_id, content, embedding, category, document_date,
+          confidence, prompt_version, extractor_model
+        ) VALUES (
+          ${container.id}, ${entry.memory.content},
+          ${vectorLiteral(vector)}::vector,
+          ${entry.memory.category},
+          ${args.documentDate ?? null},
+          ${entry.memory.confidence},
+          ${EXTRACTION_PROMPT_VERSION},
+          ${extractorModel}
+        )
+        RETURNING id
+      `;
+      const memoryId = inserted[0]?.id;
+      if (!memoryId) continue;
+      await tx`
+        INSERT INTO memory_chunks (memory_id, chunk_id, relevance)
+        VALUES (${memoryId}, ${sourceChunkId}, ${1.0})
+        ON CONFLICT (memory_id, chunk_id) DO NOTHING
+      `;
+      memoriesWritten += 1;
     }
 
     await tx`
@@ -199,8 +286,9 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     logger.info(
       {
         conversationId: conversation.id,
-        chunkCount: chunks.length,
-        embeddingModel: embeddings.model,
+        chunkCount: plans.length,
+        memoryCount: memoriesWritten,
+        embeddingModel: chunkEmbeddings.model,
       },
       "ingestion_complete",
     );
@@ -208,7 +296,51 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     return {
       conversationId: conversation.id,
       ingestionStatus: "complete",
-      chunksWritten: chunks.length,
+      chunksWritten: plans.length,
+      memoriesWritten,
     };
   });
+}
+
+async function upsertConversation(
+  tx: postgres.TransactionSql | postgres.Sql,
+  containerId: string,
+  args: IngestArgs,
+  status: string,
+  messageCount: number,
+): Promise<ConversationRow> {
+  const rows = await tx<ConversationRow[]>`
+    INSERT INTO conversations (
+      container_id, external_id, message_count, ingestion_status, metadata
+    ) VALUES (
+      ${containerId},
+      ${args.externalId ?? null},
+      ${messageCount},
+      ${status},
+      ${tx.json(JSON.parse(JSON.stringify(args.metadata ?? {})))}
+    )
+    RETURNING id, container_id, external_id, ingestion_status
+  `;
+  const row = rows[0];
+  if (!row) throw new IngestionError("conversation insert returned no row");
+  return row;
+}
+
+async function extractMemoriesSafely(
+  extractor: ExtractDeps,
+  chunkContent: string,
+): Promise<ExtractedMemory[]> {
+  try {
+    return await extractMemories(extractor, { chunkContent });
+  } catch (err) {
+    // An extractor failure on one chunk should not block the whole session.
+    // The chunk is still written and remains searchable as raw RAG; the
+    // memory layer just misses this entry. Better to land 19/20 memories
+    // than zero.
+    logger.warn(
+      { err: err instanceof Error ? err.message : err },
+      "extractor_failed_skipping_chunk",
+    );
+    return [];
+  }
 }

@@ -4,7 +4,7 @@ This document defines the phased build plan for **MemCore**. Phases are sequenti
 
 For *what* to build, see `SPEC.md`. For *why*, see `DESIGN.md`. For *how* to work in this repo, see `AGENTS.md`.
 
-**Current phase: Phase 2** (Phases 0–1 complete)
+**Current phase: Phase 2 in progress** — code/schema/queue landed; eval baseline pending an OPENAI_API_KEY (or injected `LLMClient`) so extraction can run end-to-end.
 
 ---
 
@@ -198,7 +198,8 @@ This section is updated as phases complete. Track quality over time.
 | ----- | ---- | ------------ | --------------------- | ---------------- | -------- | ------------- | ----- |
 | 1 (stub embedder) | 2026-04-29 | 13.3% | 13.3% (2/15) | n/a | n/a | n/a | Naive RAG; `StubEmbedder` for plumbing only — number is noise (random baseline). |
 | 1 (OpenAI emb.)   | TBD        | —     | —             | n/a | n/a | n/a | Re-run with `OPENAI_API_KEY` set to lock in the real Phase 1 baseline. |
-| 2     | TBD  | —            | —                     | n/a              | n/a      | n/a           | + memories layer |
+| 2 (stub, no LLM)  | 2026-04-29 | 0%    | 0% (0/15)     | n/a | n/a | n/a | Plumbing run only. No `OPENAI_API_KEY` → no extraction → memories table empty → search returns nothing. Confirms the Phase 2 search path is wired correctly (memory-first, no fallback to chunks). |
+| 2 (real LLM)      | TBD        | —     | —             | n/a | n/a | n/a | Re-run with `OPENAI_API_KEY` and `EXTRACTION_MODEL=gpt-4o-mini` (or inject an Anthropic `LLMClient` for `claude-haiku-4-5`). Target ≥+10 points over Phase 1. |
 | 3     | TBD  | —            | —                     | n/a              | n/a      | n/a           | + contextual + hybrid + rerank |
 | 4     | TBD  | —            | —                     | —                | n/a      | —             | + graph + conflict detection |
 | 5     | TBD  | —            | —                     | —                | —        | —             | + temporal |

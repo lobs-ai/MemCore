@@ -1,10 +1,9 @@
 /**
  * POST /v1/search — query memory.
  *
- * Phase 1 returns chunk-level vector search results. SPEC.md's response shape
- * uses memories with attached source chunks; until memories exist, we return
- * the chunks directly under the same `results[].chunks` shape so clients can
- * keep their parsing stable across phases.
+ * Phase 2 returns memory-level results, with source chunks joined back in
+ * when `include_chunks` is true. Response shape mirrors SPEC § /v1/search:
+ *   { results: [{ memory, score, chunks }], query_metadata }
  */
 
 import type { FastifyInstance } from "fastify";
@@ -26,11 +25,27 @@ const ChunkResponse = z.object({
   source_type: z.string(),
   source_id: z.string().nullable(),
   document_date: z.string().datetime().nullable(),
+  relevance: z.number(),
+});
+
+const MemoryResponse = z.object({
+  id: z.string().uuid(),
+  content: z.string(),
+  category: z.string(),
+  status: z.string(),
+  version: z.number(),
+  confidence: z.number(),
+  document_date: z.string().datetime().nullable(),
+  event_date: z.string().datetime().nullable(),
+  event_date_precision: z.string().nullable(),
+  prompt_version: z.string(),
+  extractor_model: z.string(),
 });
 
 const SearchResponse = z.object({
   results: z.array(
     z.object({
+      memory: MemoryResponse,
       score: z.number(),
       chunks: z.array(ChunkResponse),
     }),
@@ -60,19 +75,31 @@ export function registerSearchRoute(app: FastifyInstance): void {
 
       return {
         results: result.results.map((r) => ({
+          memory: {
+            id: r.memory.id,
+            content: r.memory.content,
+            category: r.memory.category,
+            status: r.memory.status,
+            version: r.memory.version,
+            confidence: r.memory.confidence,
+            document_date: r.memory.documentDate ? r.memory.documentDate.toISOString() : null,
+            event_date: r.memory.eventDate ? r.memory.eventDate.toISOString() : null,
+            event_date_precision: r.memory.eventDatePrecision,
+            prompt_version: r.memory.promptVersion,
+            extractor_model: r.memory.extractorModel,
+          },
           score: r.score,
-          chunks: [
-            {
-              id: r.chunk.id,
-              content: r.chunk.content,
-              contextual_prefix: r.chunk.contextualPrefix,
-              position: r.chunk.position,
-              conversation_id: r.chunk.conversationId,
-              source_type: r.chunk.sourceType,
-              source_id: r.chunk.sourceId,
-              document_date: r.chunk.documentDate ? r.chunk.documentDate.toISOString() : null,
-            },
-          ],
+          chunks: r.memory.chunks.map((c) => ({
+            id: c.id,
+            content: c.content,
+            contextual_prefix: c.contextualPrefix,
+            position: c.position,
+            conversation_id: c.conversationId,
+            source_type: c.sourceType,
+            source_id: c.sourceId,
+            document_date: c.documentDate ? c.documentDate.toISOString() : null,
+            relevance: c.relevance,
+          })),
         })),
         query_metadata: {
           total_candidates: result.queryMetadata.totalCandidates,

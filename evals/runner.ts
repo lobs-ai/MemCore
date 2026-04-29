@@ -78,16 +78,23 @@ async function runCase(memcore: MemCore, containerTag: string, c: EvalCase): Pro
     containerTag,
     query: c.question,
     limit: 5,
+    includeChunks: true,
   });
   const latencyMs = Math.round(performance.now() - start);
-  const retrievedContents = result.results.flatMap((r) => [r.chunk.content]);
+  // Phase 2: score the memory content first; fall back to source chunks so
+  // the metric still works even when extraction returned [] for the relevant
+  // material (chunk-only fallback path).
+  const retrievedContents = result.results.flatMap((r) => [
+    r.memory.content,
+    ...r.memory.chunks.map((ch) => ch.content),
+  ]);
   const passed = score(c, retrievedContents);
 
   return {
     case_id: c.case_id,
     category: c.category,
     passed,
-    retrievedTopK: result.results.map((r) => ({ content: r.chunk.content, score: r.score })),
+    retrievedTopK: result.results.map((r) => ({ content: r.memory.content, score: r.score })),
     latencyMs,
   };
 }

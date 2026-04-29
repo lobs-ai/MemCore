@@ -1,10 +1,14 @@
 /**
  * POST /v1/add — write content into memory.
  *
- * Phase 1 runs ingestion synchronously inside the request handler (chunk →
- * embed → write). SPEC.md describes the full async session-scoped pipeline;
- * that lives behind a queue from Phase 2 onwards. The handler still returns
- * 202 to keep the contract stable across phases.
+ * When a queue producer is wired into the server (`buildServer({ memcore,
+ * producer })`), the request enqueues a job and returns 202 with
+ * `ingestion_status: "pending"`. The worker completes the pipeline async.
+ * Without a producer, ingestion runs synchronously inside the request — the
+ * 202 contract is preserved either way.
+ *
+ * Idempotency lives in the pipeline itself: re-adding a conversation with
+ * the same `(container_tag, external_id)` is a no-op.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -33,7 +37,7 @@ const AddRequest = z
   });
 
 const AddResponse = z.object({
-  id: z.string().uuid(),
+  id: z.string().nullable(),
   ingestion_status: z.string(),
 });
 
@@ -47,6 +51,20 @@ export function registerAddRoute(app: FastifyInstance): void {
     },
     handler: async (req, reply) => {
       const body = req.body as z.infer<typeof AddRequest>;
+
+      if (app.producer) {
+        const jobId = await app.producer.enqueueIngest({
+          containerTag: body.container_tag,
+          content: body.content ?? "",
+          messages: body.messages,
+          sourceType: body.source_type,
+          externalId: body.external_id,
+          documentDate: body.document_date ? body.document_date.toISOString() : undefined,
+          metadata: body.metadata,
+        });
+        return reply.status(202).send({ id: jobId, ingestion_status: "pending" });
+      }
+
       const result = await app.memcore.add({
         containerTag: body.container_tag,
         content: body.content,
