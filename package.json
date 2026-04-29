@@ -35,7 +35,9 @@
     "db:reset": "tsx db/reset.ts",
     "db:vector-index": "tsx scripts/create-vector-index.ts",
     "reingest": "tsx scripts/reingest.ts",
-    "eval": "tsx evals/runner.ts"
+    "eval": "tsx evals/runner.ts",
+    "test:client": "tsx scripts/test-client.ts",
+    "test:e2e": "tsx scripts/test-client.ts e2e"
   },
   "dependencies": {
     "@fastify/sensible": "^6.0.3",

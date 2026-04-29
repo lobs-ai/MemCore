@@ -49,6 +49,22 @@ PR template:
 
 PRs must pass CI: lint, type check, test, eval suite (for quality-affecting changes).
 
+## Bumping the SDK version
+
+Single source of truth: `package.json#version`. To cut a release:
+
+1. Edit `version` in `package.json` (semver — `0.1.0` → `0.1.1` etc.).
+2. `pnpm build` — tsup inlines the value into the bundle.
+3. `pnpm test` — `src/version.test.ts` asserts the runtime constant matches `package.json`.
+
+The version is exposed three ways and they all read from the same source:
+
+- `import { VERSION } from "memcore"` — top-level constant
+- `MemCore.version` / `new MemCore(...).version` — class + instance accessor
+- `GET /v1/health` returns `{ status, db, version }`
+
+Don't hand-edit `src/version.ts`. The `import ... with { type: "json" }` line there is the one source-of-truth read; everything else flows from it.
+
 ## Code style
 
 ### TypeScript

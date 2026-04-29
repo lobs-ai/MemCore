@@ -48,6 +48,7 @@ import { CohereReranker, PassthroughReranker, type Reranker } from "./retrieval/
 import { fuseRanks } from "./retrieval/rrf.js";
 import { filterByDateRange } from "./retrieval/temporal-filter.js";
 import { type DateRange, parseTemporalScope } from "./retrieval/temporal-parser.js";
+import { VERSION } from "./version.js";
 
 const logger = getLogger("memcore");
 
@@ -240,6 +241,10 @@ const HYBRID_KEYWORD_TOPK = 50;
 const HYBRID_FUSED_TOPK = 30;
 
 export class MemCore {
+  /** SDK version, sourced from package.json. Bump in package.json, not here. */
+  static readonly version: string = VERSION;
+  /** Instance accessor mirroring `MemCore.version` so server / client code can log it. */
+  readonly version: string = VERSION;
   readonly costTracker: CostTracker;
   private readonly sql: postgres.Sql;
   private readonly embedder: Embedder;

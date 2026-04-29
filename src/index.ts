@@ -16,6 +16,7 @@
  */
 
 export { MemCore } from "./memcore.js";
+export { VERSION } from "./version.js";
 export type {
   MemCoreOptions,
   AddArgs,
