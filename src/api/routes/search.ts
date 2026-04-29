@@ -14,6 +14,7 @@ const SearchRequest = z.object({
   query: z.string().min(1),
   limit: z.number().int().positive().max(100).default(10),
   include_chunks: z.boolean().default(true),
+  expand_graph: z.boolean().default(false),
 });
 
 const ChunkResponse = z.object({
@@ -42,12 +43,20 @@ const MemoryResponse = z.object({
   extractor_model: z.string(),
 });
 
+const RelatedMemoryResponse = z.object({
+  memory: MemoryResponse,
+  edge_type: z.enum(["updates", "extends", "derives", "contradicts"]),
+  direction: z.enum(["outgoing", "incoming"]),
+  edge_confidence: z.number(),
+});
+
 const SearchResponse = z.object({
   results: z.array(
     z.object({
       memory: MemoryResponse,
       score: z.number(),
       chunks: z.array(ChunkResponse),
+      related_memories: z.array(RelatedMemoryResponse),
     }),
   ),
   query_metadata: z.object({
@@ -71,23 +80,38 @@ export function registerSearchRoute(app: FastifyInstance): void {
         query: body.query,
         limit: body.limit,
         includeChunks: body.include_chunks,
+        expandGraph: body.expand_graph,
+      });
+
+      const memoryEnvelope = (m: {
+        id: string;
+        content: string;
+        category: string;
+        status: string;
+        version: number;
+        confidence: number;
+        documentDate: Date | null;
+        eventDate: Date | null;
+        eventDatePrecision: string | null;
+        promptVersion: string;
+        extractorModel: string;
+      }) => ({
+        id: m.id,
+        content: m.content,
+        category: m.category,
+        status: m.status,
+        version: m.version,
+        confidence: m.confidence,
+        document_date: m.documentDate ? m.documentDate.toISOString() : null,
+        event_date: m.eventDate ? m.eventDate.toISOString() : null,
+        event_date_precision: m.eventDatePrecision,
+        prompt_version: m.promptVersion,
+        extractor_model: m.extractorModel,
       });
 
       return {
         results: result.results.map((r) => ({
-          memory: {
-            id: r.memory.id,
-            content: r.memory.content,
-            category: r.memory.category,
-            status: r.memory.status,
-            version: r.memory.version,
-            confidence: r.memory.confidence,
-            document_date: r.memory.documentDate ? r.memory.documentDate.toISOString() : null,
-            event_date: r.memory.eventDate ? r.memory.eventDate.toISOString() : null,
-            event_date_precision: r.memory.eventDatePrecision,
-            prompt_version: r.memory.promptVersion,
-            extractor_model: r.memory.extractorModel,
-          },
+          memory: memoryEnvelope(r.memory),
           score: r.score,
           chunks: r.memory.chunks.map((c) => ({
             id: c.id,
@@ -99,6 +123,12 @@ export function registerSearchRoute(app: FastifyInstance): void {
             source_id: c.sourceId,
             document_date: c.documentDate ? c.documentDate.toISOString() : null,
             relevance: c.relevance,
+          })),
+          related_memories: r.relatedMemories.map((rm) => ({
+            memory: memoryEnvelope(rm.memory),
+            edge_type: rm.edgeType,
+            direction: rm.direction,
+            edge_confidence: rm.edgeConfidence,
           })),
         })),
         query_metadata: {

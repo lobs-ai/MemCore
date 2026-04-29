@@ -143,13 +143,27 @@ async function main(): Promise<void> {
 
   const results: EvalResult[] = [];
   try {
-    // Ingest every case's setup first.
+    // Ingest every case's setup first. Cases with `setup_sessions` ingest
+    // each session as its own conversation so the conflict detector and
+    // multi-session retrieval are exercised end-to-end.
     for (const c of cases) {
-      await memcore.add({
-        containerTag,
-        messages: c.setup,
-        externalId: `${c.case_id}-setup`,
-      });
+      if (c.setup_sessions && c.setup_sessions.length > 0) {
+        for (let i = 0; i < c.setup_sessions.length; i += 1) {
+          const session = c.setup_sessions[i];
+          if (!session || session.length === 0) continue;
+          await memcore.add({
+            containerTag,
+            messages: session,
+            externalId: `${c.case_id}-session-${i}`,
+          });
+        }
+      } else if (c.setup && c.setup.length > 0) {
+        await memcore.add({
+          containerTag,
+          messages: c.setup,
+          externalId: `${c.case_id}-setup`,
+        });
+      }
     }
 
     // Then query each.

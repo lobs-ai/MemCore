@@ -34,6 +34,7 @@ import { OpenAIEmbedder } from "./llm/openai-embedder.js";
 import { OpenAILLMClient } from "./llm/openai-llm-client.js";
 import { StubEmbedder } from "./llm/stub-embedder.js";
 import { getLogger } from "./logging.js";
+import { type RelatedMemory, expandGraph } from "./retrieval/graph-expander.js";
 import { keywordSearchMemories } from "./retrieval/keyword-search.js";
 import {
   type MemoryHit,
@@ -89,6 +90,16 @@ export interface MemCoreOptions {
   extractionModel?: string;
   /** Model name passed to the LLM client for chunk contextualization. */
   contextualizerModel?: string;
+  /** Model name passed to the LLM client for conflict detection (Phase 4). */
+  conflictModel?: string;
+  /**
+   * Cosine similarity threshold (0..1) above which the conflict detector LLM
+   * is invoked. Below it, candidates are classified as `new` without an LLM
+   * call. Default 0.75 (see SPEC § Phase 4).
+   */
+  conflictSimilarityThreshold?: number;
+  /** Top-K existing memories considered per candidate during conflict detection. Default 5. */
+  conflictTopK?: number;
   /** Chunker target token count. Defaults to 800. */
   chunkMaxTokens?: number;
   /** Chunker minimum token count below which input becomes a single chunk. Defaults to 100. */
@@ -121,11 +132,19 @@ export interface SearchArgs {
   limit?: number;
   /** When true, include source chunks for each memory hit. Defaults to true. */
   includeChunks?: boolean;
+  /**
+   * When true, pull one-hop edge neighbours for each top hit and return them
+   * under `relatedMemories`. Defaults to false — the caller opts in because
+   * graph expansion adds a join and a small amount of payload.
+   */
+  expandGraph?: boolean;
 }
 
 export interface SearchResult {
   memory: MemoryHit;
   score: number;
+  /** Populated when the search was called with `expandGraph: true`; otherwise []. */
+  relatedMemories: RelatedMemory[];
 }
 
 export interface SearchResponse {
@@ -138,6 +157,7 @@ export interface SearchResponse {
 
 const DEFAULT_EXTRACTION_MODEL = "gpt-4o-mini";
 const DEFAULT_CONTEXTUALIZER_MODEL = "gpt-4o-mini";
+const DEFAULT_CONFLICT_MODEL = "gpt-4o-mini";
 const DEFAULT_RERANKER_MODEL = "rerank-v3.5";
 
 const HYBRID_VECTOR_TOPK = 50;
@@ -151,6 +171,9 @@ export class MemCore {
   private readonly llmClient: LLMClient | null;
   private readonly extractionModel: string;
   private readonly contextualizerModel: string;
+  private readonly conflictModel: string;
+  private readonly conflictSimilarityThreshold: number | undefined;
+  private readonly conflictTopK: number | undefined;
   private readonly reranker: Reranker;
   private readonly chunkOptions: { targetTokens: number; minTokens: number };
 
@@ -189,6 +212,9 @@ export class MemCore {
 
     this.extractionModel = opts.extractionModel ?? DEFAULT_EXTRACTION_MODEL;
     this.contextualizerModel = opts.contextualizerModel ?? DEFAULT_CONTEXTUALIZER_MODEL;
+    this.conflictModel = opts.conflictModel ?? DEFAULT_CONFLICT_MODEL;
+    this.conflictSimilarityThreshold = opts.conflictSimilarityThreshold;
+    this.conflictTopK = opts.conflictTopK;
 
     const llmKey = opts.openaiApiKey;
     if (opts.llmClient) {
@@ -255,6 +281,14 @@ export class MemCore {
           ? {
               extractor: { llm: this.llmClient, model: this.extractionModel },
               contextualizer: { llm: this.llmClient, model: this.contextualizerModel },
+              conflictDetector: {
+                llm: this.llmClient,
+                model: this.conflictModel,
+                ...(this.conflictTopK !== undefined ? { topK: this.conflictTopK } : {}),
+                ...(this.conflictSimilarityThreshold !== undefined
+                  ? { similarityThreshold: this.conflictSimilarityThreshold }
+                  : {}),
+              },
             }
           : {}),
       },
@@ -275,6 +309,7 @@ export class MemCore {
     if (!args.query?.trim()) throw new ValidationError("query is required");
     const limit = args.limit ?? 10;
     const includeChunks = args.includeChunks ?? true;
+    const includeGraph = args.expandGraph ?? false;
 
     const start = performance.now();
 
@@ -346,10 +381,16 @@ export class MemCore {
       };
     }
 
-    // Hydrate full memory rows + chunks for the survivors.
+    // Hydrate full memory rows + chunks for the survivors. Graph expansion
+    // runs in parallel with the chunk join — both touch independent tables.
     const winnerIds = reranked.map((r) => r.id);
-    const memoryMap = await fetchMemoriesByIds(this.sql, containerId, winnerIds);
-    const chunkMap = includeChunks ? await joinChunksForMemories(this.sql, winnerIds) : new Map();
+    const [memoryMap, chunkMap, relatedMap] = await Promise.all([
+      fetchMemoriesByIds(this.sql, containerId, winnerIds),
+      includeChunks ? joinChunksForMemories(this.sql, winnerIds) : Promise.resolve(new Map()),
+      includeGraph
+        ? expandGraph(this.sql, containerId, winnerIds)
+        : Promise.resolve(new Map<string, RelatedMemory[]>()),
+    ]);
 
     const results: SearchResult[] = [];
     for (const r of reranked) {
@@ -360,7 +401,11 @@ export class MemCore {
         score: r.score,
         chunks: chunkMap.get(r.id) ?? [],
       };
-      results.push({ memory, score: r.score });
+      results.push({
+        memory,
+        score: r.score,
+        relatedMemories: relatedMap.get(r.id) ?? [],
+      });
     }
 
     return {

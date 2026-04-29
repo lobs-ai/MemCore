@@ -28,6 +28,13 @@ import { EmbeddingError, IngestionError } from "../errors.js";
 import type { Embedder } from "../llm/embedder.js";
 import { getLogger } from "../logging.js";
 import { chunkText } from "./chunker.js";
+import {
+  type ConflictDecision,
+  type DetectConflictsDeps,
+  decisionToRelationship,
+  detectConflicts,
+  pgSimilarMemoryFinder,
+} from "./conflict-detector.js";
 import { type ContextualizeDeps, contextualizeChunks } from "./contextualizer.js";
 import {
   EXTRACTION_PROMPT_VERSION,
@@ -65,6 +72,12 @@ export interface IngestResult {
   ingestionStatus: string;
   chunksWritten: number;
   memoriesWritten: number;
+  /** Edges written by the conflict detector (updates / extends / derives / contradicts). */
+  edgesWritten: number;
+  /** Existing memories whose status flipped to `superseded` because a new memory updated them. */
+  memoriesSuperseded: number;
+  /** Candidate memories the conflict detector classified as duplicates and skipped. */
+  duplicatesSkipped: number;
 }
 
 export interface IngestDeps {
@@ -83,6 +96,17 @@ export interface IngestDeps {
    * When omitted, chunks are embedded as raw content (Phase 1/2 behaviour).
    */
   contextualizer?: ContextualizeDeps;
+  /**
+   * Conflict detection configuration. When present, each candidate memory is
+   * classified against existing memories (top-K vector similarity), edges are
+   * written, and superseded memories' status is flipped. When omitted, every
+   * candidate is inserted as `new` with no edges (Phase 2/3 behaviour).
+   *
+   * Pass either an LLMClient + model and we'll use the default Postgres
+   * similarity finder, or override `findSimilar` for custom retrieval.
+   */
+  conflictDetector?: Omit<DetectConflictsDeps, "findSimilar"> &
+    Partial<Pick<DetectConflictsDeps, "findSimilar">>;
 }
 
 function contentHash(text: string): string {
@@ -91,6 +115,18 @@ function contentHash(text: string): string {
 
 function flattenMessages(messages: { role: string; content: string }[]): string {
   return messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
+}
+
+/**
+ * Best-effort container-id lookup before the write transaction. Returns null
+ * for first-ingest containers (in which case no existing memories exist so
+ * conflict detection has nothing to compare against anyway).
+ */
+async function resolveContainerId(sql: postgres.Sql, tag: string): Promise<string | null> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM containers WHERE tag = ${tag} LIMIT 1
+  `;
+  return rows[0]?.id ?? null;
 }
 
 async function getOrCreateContainer(
@@ -135,6 +171,9 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
         ingestionStatus: conv.ingestion_status,
         chunksWritten: 0,
         memoriesWritten: 0,
+        edgesWritten: 0,
+        memoriesSuperseded: 0,
+        duplicatesSkipped: 0,
       };
     });
   }
@@ -206,6 +245,30 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     memoryVectors = memoryEmbeddings.vectors;
   }
 
+  // Stage: conflict detection. Runs before the write transaction so the
+  // similarity search reads memories committed by prior sessions. We resolve
+  // the container id against the live pool first, then classify each candidate.
+  // When no detector is configured every candidate is treated as `new`.
+  const conflictContainerId = await resolveContainerId(deps.sql, args.containerTag);
+  const conflictDecisions: Map<number, ConflictDecision> = new Map();
+  if (deps.conflictDetector && flatMemories.length > 0 && conflictContainerId) {
+    const candidates = flatMemories.map((entry, idx) => ({
+      index: idx,
+      content: entry.memory.content,
+      category: entry.memory.category,
+      vector: memoryVectors[idx] ?? [],
+    }));
+    const detectorDeps = {
+      ...deps.conflictDetector,
+      findSimilar: deps.conflictDetector.findSimilar ?? pgSimilarMemoryFinder(deps.sql),
+    };
+    const decisions = await detectConflicts(detectorDeps, {
+      containerId: conflictContainerId,
+      candidates,
+    });
+    for (const d of decisions) conflictDecisions.set(d.index, d);
+  }
+
   // Stage: transactional write.
   return await deps.sql.begin(async (tx) => {
     const container = await getOrCreateContainer(tx, args.containerTag);
@@ -223,6 +286,9 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
           ingestionStatus: existing[0].ingestion_status,
           chunksWritten: 0,
           memoriesWritten: 0,
+          edgesWritten: 0,
+          memoriesSuperseded: 0,
+          duplicatesSkipped: 0,
         };
       }
     }
@@ -271,8 +337,17 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       chunkIds[i] = inserted[0]?.id ?? null;
     }
 
-    // Memories.
+    // Memories. Honour conflict decisions (Phase 4):
+    //   - duplicate: skip insert; link the existing memory to the source chunk.
+    //   - update:    insert the new memory; flip target's status to superseded;
+    //                write an `updates` edge.
+    //   - extend / derive / contradicts: insert + write the corresponding edge.
+    //   - new (or no detector): insert; no edge.
     let memoriesWritten = 0;
+    let edgesWritten = 0;
+    let memoriesSuperseded = 0;
+    let duplicatesSkipped = 0;
+    const supersededTargets = new Set<string>();
     const extractorModel = deps.extractor?.model ?? "none";
     for (let m = 0; m < flatMemories.length; m += 1) {
       const entry = flatMemories[m];
@@ -280,6 +355,21 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       if (!entry || !vector) continue;
       const sourceChunkId = chunkIds[entry.planIdx];
       if (!sourceChunkId) continue;
+
+      const decision = conflictDecisions.get(m);
+
+      // Duplicate: skip the insert, but still link the existing memory to the
+      // chunk so source-chunk joins surface this conversation as evidence.
+      if (decision?.decision === "duplicate" && decision.targetId) {
+        await tx`
+          INSERT INTO memory_chunks (memory_id, chunk_id, relevance)
+          VALUES (${decision.targetId}, ${sourceChunkId}, ${1.0})
+          ON CONFLICT (memory_id, chunk_id) DO NOTHING
+        `;
+        duplicatesSkipped += 1;
+        continue;
+      }
+
       const inserted = await tx<{ id: string }[]>`
         INSERT INTO memories (
           container_id, content, embedding, category, document_date,
@@ -303,6 +393,33 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
         ON CONFLICT (memory_id, chunk_id) DO NOTHING
       `;
       memoriesWritten += 1;
+
+      if (decision?.targetId) {
+        const relType = decisionToRelationship(decision.decision);
+        if (relType) {
+          const edgeRow = await tx<{ id: string }[]>`
+            INSERT INTO edges (
+              source_memory_id, target_memory_id, relationship_type, confidence
+            ) VALUES (
+              ${memoryId}, ${decision.targetId}, ${relType}, ${decision.confidence}
+            )
+            ON CONFLICT (source_memory_id, target_memory_id, relationship_type)
+              DO NOTHING
+            RETURNING id
+          `;
+          if (edgeRow[0]) edgesWritten += 1;
+
+          if (relType === "updates" && !supersededTargets.has(decision.targetId)) {
+            await tx`
+              UPDATE memories
+              SET status = 'superseded', updated_at = NOW()
+              WHERE id = ${decision.targetId} AND status = 'active'
+            `;
+            supersededTargets.add(decision.targetId);
+            memoriesSuperseded += 1;
+          }
+        }
+      }
     }
 
     await tx`
@@ -316,6 +433,9 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
         conversationId: conversation.id,
         chunkCount: plans.length,
         memoryCount: memoriesWritten,
+        edgesWritten,
+        memoriesSuperseded,
+        duplicatesSkipped,
         embeddingModel: chunkEmbeddings.model,
       },
       "ingestion_complete",
@@ -326,6 +446,9 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       ingestionStatus: "complete",
       chunksWritten: plans.length,
       memoriesWritten,
+      edgesWritten,
+      memoriesSuperseded,
+      duplicatesSkipped,
     };
   });
 }

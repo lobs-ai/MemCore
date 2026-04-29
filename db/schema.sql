@@ -16,11 +16,15 @@
 --   memories        atomic facts extracted from chunks
 --   memory_chunks   many-to-many link memory ↔ source chunks
 --
--- Phase 4 will add edges (typed memory→memory relationships).
+-- Phase 4 tables (added):
+--   edges           typed memory→memory relationships (updates / extends /
+--                   derives / contradicts), built by the conflict detector
+--                   during ingestion and traversed one-hop at query time.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+DROP TABLE IF EXISTS edges CASCADE;
 DROP TABLE IF EXISTS memory_chunks CASCADE;
 DROP TABLE IF EXISTS memories CASCADE;
 DROP TABLE IF EXISTS chunks CASCADE;
@@ -130,3 +134,24 @@ CREATE TABLE memory_chunks (
   PRIMARY KEY (memory_id, chunk_id)
 );
 CREATE INDEX ix_memory_chunks_chunk_id ON memory_chunks(chunk_id);
+
+-- edges: typed memory→memory relationships built by the conflict detector
+-- during ingestion (Phase 4). Traversed one-hop at query time when the search
+-- request sets `expand_graph: true`.
+--
+-- relationship_type values:
+--   updates       — source supersedes target; target.status flips to 'superseded'
+--   extends       — source refines target without contradiction; both stay active
+--   derives       — source is a second-order conclusion drawn from target(s)
+--   contradicts   — both stay active but disagree; surfaced for higher-level logic
+CREATE TABLE edges (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_memory_id   UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  target_memory_id   UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relationship_type  TEXT NOT NULL,
+  confidence         REAL NOT NULL DEFAULT 1.0,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_edges_source_target_type UNIQUE (source_memory_id, target_memory_id, relationship_type)
+);
+CREATE INDEX ix_edges_source_memory_id ON edges(source_memory_id);
+CREATE INDEX ix_edges_target_memory_id ON edges(target_memory_id);

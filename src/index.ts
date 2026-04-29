@@ -73,6 +73,11 @@ export {
 // Retrieval result shapes.
 export type { ChunkHit } from "./retrieval/vector-search.js";
 export type { MemoryHit, ChunkRef } from "./retrieval/memory-search.js";
+export type {
+  RelatedMemory,
+  EdgeType,
+  EdgeDirection,
+} from "./retrieval/graph-expander.js";
 export type { ExtractedMemory, MemoryCategory } from "./ingestion/extractor.js";
 export type { Reranker, RerankArgs, RerankDocument, RerankedHit } from "./retrieval/reranker.js";
 export {
