@@ -1,6 +1,6 @@
-# Memory Layer
+# MemCore
 
-A from-scratch implementation of a memory engine for AI agents — chunks, atomic memories, a typed graph, hybrid retrieval with temporal reasoning. Inspired by Supermemory and Mem0.
+MemCore is a memory engine for AI agents — chunks, atomic memories, a typed graph, hybrid retrieval with temporal reasoning. Inspired by Supermemory and Mem0.
 
 ## What this is
 
@@ -26,7 +26,7 @@ Prerequisites: Docker, Python 3.11+, `uv` or `pip`.
 ```bash
 # 1. Clone and enter
 git clone <repo>
-cd memory-layer
+cd MemCore
 
 # 2. Set up environment
 cp .env.example .env
@@ -119,7 +119,7 @@ scripts/         # One-off operational scripts
 
 ## Status
 
-**Phase 1: Naive RAG baseline.** See [ROADMAP.md](./ROADMAP.md) for what's built, what's next, and where we are.
+**Phase 0 complete; Phase 1 next.** See [ROADMAP.md](./ROADMAP.md) for what's built, what's next, and where we are.
 
 ## License
 

@@ -4,7 +4,7 @@ This file gives AI coding agents (Claude Code, Cursor, etc.) the context they ne
 
 ## What this project is
 
-We are building a **memory layer for AI agents** — a system that ingests conversations and documents, extracts atomic facts, stores them in a graph with typed relationships, and serves them back via a search API. Think of it as a from-scratch implementation of Supermemory or Mem0.
+We are building **MemCore** — a memory engine for AI agents that ingests conversations and documents, extracts atomic facts, stores them in a graph with typed relationships, and serves them back via a search API. Think of it as a from-scratch implementation in the spirit of Supermemory or Mem0.
 
 The system is **not** a vector database. It is a memory engine that uses a vector database as one of several components. The distinction matters: we store both raw chunks (archive) and atomic memories (semantic index), connected by a typed graph that handles updates, contradictions, and inferences over time.
 

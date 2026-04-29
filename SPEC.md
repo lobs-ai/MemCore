@@ -1,6 +1,6 @@
 # SPEC.md
 
-This document is the authoritative reference for **what** the system does. Schemas, API contracts, configuration, and project structure are defined here. For *why*, see `DESIGN.md`. For build order, see `ROADMAP.md`.
+This document is the authoritative reference for **what MemCore does**. Schemas, API contracts, configuration, and project structure are defined here. For *why*, see `DESIGN.md`. For build order, see `ROADMAP.md`.
 
 If the code disagrees with this spec, the spec wins. Update the code, or update the spec deliberately and note it in the changelog at the bottom.
 
@@ -461,7 +461,7 @@ Prompt files use `{variable}` placeholders, rendered with Python's `str.format()
 Custom exception hierarchy in `src/errors/`:
 
 ```
-SupermemoryError (base)
+MemCoreError (base)
 ├── ValidationError       # bad input
 ├── NotFoundError         # missing resource
 ├── IngestionError        # pipeline failure

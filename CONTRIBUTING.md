@@ -1,6 +1,6 @@
 # CONTRIBUTING.md
 
-Conventions for contributing to this codebase. Whether you're a human or an AI coding agent, follow these.
+Conventions for contributing to **MemCore**. Whether you're a human or an AI coding agent, follow these.
 
 ## Before you start
 

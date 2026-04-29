@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file is for Claude Code specifically. It mirrors `AGENTS.md` (which all coding agents should read) and adds Claude-specific guidance.
+This file is for Claude Code specifically while working on **MemCore**. It mirrors `AGENTS.md` (which all coding agents should read) and adds Claude-specific guidance.
 
 **Read `AGENTS.md` first.** It is the primary source of working instructions. This file supplements it.
 
@@ -105,7 +105,7 @@ Then read the doc(s) relevant to the task. Then plan. Then code.
 - When you don't know, say so. Don't fabricate file paths, function signatures, or library APIs.
 - When you're uncertain, propose two options instead of guessing.
 
-## Specific reminders for memory-system work
+## Specific reminders for MemCore work
 
 This codebase has a few traps that LLMs (including you) tend to fall into. Watch for these:
 

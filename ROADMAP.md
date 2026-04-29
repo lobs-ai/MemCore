@@ -1,10 +1,10 @@
 # ROADMAP.md
 
-This document defines the phased build plan. Phases are sequential — do not start phase N+1 until phase N's exit criteria are met.
+This document defines the phased build plan for **MemCore**. Phases are sequential — do not start phase N+1 until phase N's exit criteria are met.
 
 For *what* to build, see `SPEC.md`. For *why*, see `DESIGN.md`. For *how* to work in this repo, see `AGENTS.md`.
 
-**Current phase: Phase 1**
+**Current phase: Phase 1** (Phase 0 complete)
 
 ---
 

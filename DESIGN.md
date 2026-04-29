@@ -1,6 +1,6 @@
 # DESIGN.md
 
-This document explains the *why* of the system. For *what* (schemas, APIs, file layout), see `SPEC.md`. For *when* (build order), see `ROADMAP.md`.
+This document explains the *why* behind **MemCore**. For *what* (schemas, APIs, file layout), see `SPEC.md`. For *when* (build order), see `ROADMAP.md`.
 
 ## The problem we are solving
 
