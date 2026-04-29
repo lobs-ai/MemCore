@@ -9,12 +9,23 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+const DateRangeRequest = z.object({
+  axis: z.enum(["event_date", "document_date"]),
+  from: z.string().datetime().nullable().optional(),
+  to: z.string().datetime().nullable().optional(),
+});
+
 const SearchRequest = z.object({
   container_tag: z.string().min(1),
   query: z.string().min(1),
   limit: z.number().int().positive().max(100).default(10),
   include_chunks: z.boolean().default(true),
   expand_graph: z.boolean().default(false),
+  filters: z
+    .object({
+      date_range: DateRangeRequest.nullable().optional(),
+    })
+    .optional(),
 });
 
 const ChunkResponse = z.object({
@@ -50,6 +61,12 @@ const RelatedMemoryResponse = z.object({
   edge_confidence: z.number(),
 });
 
+const DateRangeResponse = z.object({
+  axis: z.enum(["event_date", "document_date"]),
+  from: z.string().datetime().nullable(),
+  to: z.string().datetime().nullable(),
+});
+
 const SearchResponse = z.object({
   results: z.array(
     z.object({
@@ -62,6 +79,7 @@ const SearchResponse = z.object({
   query_metadata: z.object({
     total_candidates: z.number(),
     latency_ms: z.number(),
+    date_range: DateRangeResponse.nullable().optional(),
   }),
 });
 
@@ -75,12 +93,27 @@ export function registerSearchRoute(app: FastifyInstance): void {
     },
     handler: async (req) => {
       const body = req.body as z.infer<typeof SearchRequest>;
+      // `filters.date_range: null` is meaningful — it disables the LLM-driven
+      // temporal parser. `undefined` (no filters block) leaves auto-parse on.
+      const rawDateRange =
+        body.filters && "date_range" in body.filters ? body.filters.date_range : undefined;
+      const dateRange =
+        rawDateRange === undefined
+          ? undefined
+          : rawDateRange === null
+            ? null
+            : {
+                axis: rawDateRange.axis,
+                from: rawDateRange.from ? new Date(rawDateRange.from) : null,
+                to: rawDateRange.to ? new Date(rawDateRange.to) : null,
+              };
       const result = await app.memcore.search({
         containerTag: body.container_tag,
         query: body.query,
         limit: body.limit,
         includeChunks: body.include_chunks,
         expandGraph: body.expand_graph,
+        ...(dateRange === undefined ? {} : { dateRange }),
       });
 
       const memoryEnvelope = (m: {
@@ -134,6 +167,17 @@ export function registerSearchRoute(app: FastifyInstance): void {
         query_metadata: {
           total_candidates: result.queryMetadata.totalCandidates,
           latency_ms: result.queryMetadata.latencyMs,
+          date_range: result.queryMetadata.dateRange
+            ? {
+                axis: result.queryMetadata.dateRange.axis,
+                from: result.queryMetadata.dateRange.from
+                  ? result.queryMetadata.dateRange.from.toISOString()
+                  : null,
+                to: result.queryMetadata.dateRange.to
+                  ? result.queryMetadata.dateRange.to.toISOString()
+                  : null,
+              }
+            : null,
         },
       };
     },

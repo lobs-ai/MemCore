@@ -44,6 +44,8 @@ import {
 } from "./retrieval/memory-search.js";
 import { CohereReranker, PassthroughReranker, type Reranker } from "./retrieval/reranker.js";
 import { fuseRanks } from "./retrieval/rrf.js";
+import { filterByDateRange } from "./retrieval/temporal-filter.js";
+import { type DateRange, parseTemporalScope } from "./retrieval/temporal-parser.js";
 
 const logger = getLogger("memcore");
 
@@ -92,6 +94,8 @@ export interface MemCoreOptions {
   contextualizerModel?: string;
   /** Model name passed to the LLM client for conflict detection (Phase 4). */
   conflictModel?: string;
+  /** Model name passed to the LLM client for query-time temporal parsing (Phase 5). */
+  temporalParserModel?: string;
   /**
    * Cosine similarity threshold (0..1) above which the conflict detector LLM
    * is invoked. Below it, candidates are classified as `new` without an LLM
@@ -138,6 +142,17 @@ export interface SearchArgs {
    * graph expansion adds a join and a small amount of payload.
    */
   expandGraph?: boolean;
+  /**
+   * Phase 5: explicit temporal filter. When provided, the search restricts
+   * candidates to memories whose document_date or event_date falls inside the
+   * window. Use `from` / `to` as `null` for an open bound. Memories with a
+   * null event_date are kept (they're "timeless") when filtering on event_date.
+   *
+   * If omitted and the SDK has an LLM client configured, MemCore runs the
+   * temporal parser against the query and applies any inferred range. Pass
+   * `null` to disable both the parser and any auto-detected range.
+   */
+  dateRange?: DateRange | null;
 }
 
 export interface SearchResult {
@@ -152,12 +167,15 @@ export interface SearchResponse {
   queryMetadata: {
     totalCandidates: number;
     latencyMs: number;
+    /** Range that was applied to the candidate set, if any. */
+    dateRange?: DateRange | null;
   };
 }
 
 const DEFAULT_EXTRACTION_MODEL = "gpt-4o-mini";
 const DEFAULT_CONTEXTUALIZER_MODEL = "gpt-4o-mini";
 const DEFAULT_CONFLICT_MODEL = "gpt-4o-mini";
+const DEFAULT_TEMPORAL_PARSER_MODEL = "gpt-4o-mini";
 const DEFAULT_RERANKER_MODEL = "rerank-v3.5";
 
 const HYBRID_VECTOR_TOPK = 50;
@@ -172,6 +190,7 @@ export class MemCore {
   private readonly extractionModel: string;
   private readonly contextualizerModel: string;
   private readonly conflictModel: string;
+  private readonly temporalParserModel: string;
   private readonly conflictSimilarityThreshold: number | undefined;
   private readonly conflictTopK: number | undefined;
   private readonly reranker: Reranker;
@@ -213,6 +232,7 @@ export class MemCore {
     this.extractionModel = opts.extractionModel ?? DEFAULT_EXTRACTION_MODEL;
     this.contextualizerModel = opts.contextualizerModel ?? DEFAULT_CONTEXTUALIZER_MODEL;
     this.conflictModel = opts.conflictModel ?? DEFAULT_CONFLICT_MODEL;
+    this.temporalParserModel = opts.temporalParserModel ?? DEFAULT_TEMPORAL_PARSER_MODEL;
     this.conflictSimilarityThreshold = opts.conflictSimilarityThreshold;
     this.conflictTopK = opts.conflictTopK;
 
@@ -297,12 +317,15 @@ export class MemCore {
   }
 
   /**
-   * Search memory. Phase 3 hybrid pipeline:
+   * Search memory. Phase 5 pipeline:
+   *   0. Parse temporal scope (skipped when an explicit dateRange is supplied
+   *      or the caller passed `null` to opt out, or no LLM is configured).
    *   1. Embed the query.
    *   2. Vector search (top 50) and keyword search (top 50) in parallel.
    *   3. Fuse with RRF; take top 30.
-   *   4. Cross-encoder rerank to top `limit`.
-   *   5. Join source chunks if requested.
+   *   4. Apply temporal filter (when active).
+   *   5. Cross-encoder rerank to top `limit`.
+   *   6. Join source chunks if requested.
    */
   async search(args: SearchArgs): Promise<SearchResponse> {
     if (!args.containerTag) throw new ValidationError("containerTag is required");
@@ -310,6 +333,9 @@ export class MemCore {
     const limit = args.limit ?? 10;
     const includeChunks = args.includeChunks ?? true;
     const includeGraph = args.expandGraph ?? false;
+    // Caller passed an explicit `null` — disable both auto-parse and any range.
+    const callerDisabledTemporal = args.dateRange === null;
+    const callerProvidedRange = args.dateRange ?? null;
 
     const start = performance.now();
 
@@ -324,10 +350,25 @@ export class MemCore {
     }
     const containerId = containerRow[0].id;
 
-    // Embed the query, then run vector + keyword in parallel against memories.
-    const embeddingResponse = await this.embedder.embed({ texts: [args.query] });
+    // Embed the query and (optionally) parse temporal scope in parallel. The
+    // explicit caller-supplied range always wins; the parser only runs when
+    // there's none and the caller didn't opt out and we have an LLM.
+    const shouldParseTemporal =
+      !callerDisabledTemporal && callerProvidedRange === null && this.llmClient !== null;
+
+    const [embeddingResponse, parsedRange] = await Promise.all([
+      this.embedder.embed({ texts: [args.query] }),
+      shouldParseTemporal && this.llmClient
+        ? parseTemporalScope(
+            { llm: this.llmClient, model: this.temporalParserModel },
+            { query: args.query },
+          )
+        : Promise.resolve(null),
+    ]);
     const queryVector = embeddingResponse.vectors[0];
     if (!queryVector) throw new ValidationError("embedder returned no vector for query");
+
+    const activeRange: DateRange | null = callerProvidedRange ?? parsedRange ?? null;
 
     const [vectorHits, keywordHits] = await Promise.all([
       vectorSearchMemories(this.sql, {
@@ -356,14 +397,42 @@ export class MemCore {
     if (fused.length === 0) {
       return {
         results: [],
-        queryMetadata: { totalCandidates: 0, latencyMs: Math.round(performance.now() - start) },
+        queryMetadata: {
+          totalCandidates: 0,
+          latencyMs: Math.round(performance.now() - start),
+          dateRange: activeRange,
+        },
+      };
+    }
+
+    // Apply the temporal filter post-RRF, pre-rerank: rerank is the dominant
+    // cost and we want to feed it only the candidates that survived the date
+    // window. Memories with NULL event_date are kept for event_date filters
+    // (timeless facts). See temporal-filter.ts for the full rule.
+    let surviving = fused.map((f) => f.id);
+    if (activeRange) {
+      surviving = await filterByDateRange(this.sql, {
+        containerId,
+        candidateIds: surviving,
+        range: activeRange,
+      });
+    }
+
+    if (surviving.length === 0) {
+      return {
+        results: [],
+        queryMetadata: {
+          totalCandidates: fused.length,
+          latencyMs: Math.round(performance.now() - start),
+          dateRange: activeRange,
+        },
       };
     }
 
     // Cross-encoder rerank.
-    const rerankInput = fused.map((f) => ({
-      id: f.id,
-      text: contentById.get(f.id) ?? "",
+    const rerankInput = surviving.map((id) => ({
+      id,
+      text: contentById.get(id) ?? "",
     }));
     const reranked = await this.reranker.rerank({
       query: args.query,
@@ -377,6 +446,7 @@ export class MemCore {
         queryMetadata: {
           totalCandidates: fused.length,
           latencyMs: Math.round(performance.now() - start),
+          dateRange: activeRange,
         },
       };
     }
@@ -413,6 +483,7 @@ export class MemCore {
       queryMetadata: {
         totalCandidates: fused.length,
         latencyMs: Math.round(performance.now() - start),
+        dateRange: activeRange,
       },
     };
   }

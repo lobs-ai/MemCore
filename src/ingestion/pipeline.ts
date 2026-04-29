@@ -211,7 +211,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     const vector = chunkEmbeddings.vectors[i];
     if (!vector) throw new EmbeddingError("missing chunk vector", { index: i });
     const memories = deps.extractor
-      ? await extractMemoriesSafely(deps.extractor, chunk.content)
+      ? await extractMemoriesSafely(deps.extractor, chunk.content, args.documentDate)
       : [];
     plans.push({
       content: chunk.content,
@@ -373,12 +373,15 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       const inserted = await tx<{ id: string }[]>`
         INSERT INTO memories (
           container_id, content, embedding, category, document_date,
+          event_date, event_date_precision,
           confidence, prompt_version, extractor_model
         ) VALUES (
           ${container.id}, ${entry.memory.content},
           ${vectorLiteral(vector)}::vector,
           ${entry.memory.category},
           ${args.documentDate ?? null},
+          ${entry.memory.eventDate ?? null},
+          ${entry.memory.eventDatePrecision},
           ${entry.memory.confidence},
           ${EXTRACTION_PROMPT_VERSION},
           ${extractorModel}
@@ -480,9 +483,13 @@ async function upsertConversation(
 async function extractMemoriesSafely(
   extractor: ExtractDeps,
   chunkContent: string,
+  documentDate?: Date,
 ): Promise<ExtractedMemory[]> {
   try {
-    return await extractMemories(extractor, { chunkContent });
+    return await extractMemories(
+      extractor,
+      documentDate ? { chunkContent, documentDate } : { chunkContent },
+    );
   } catch (err) {
     // An extractor failure on one chunk should not block the whole session.
     // The chunk is still written and remains searchable as raw RAG; the

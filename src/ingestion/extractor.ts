@@ -16,7 +16,7 @@ import { ExtractionError } from "../errors.js";
 import type { LLMClient } from "../llm/client.js";
 import { responseText } from "../llm/types.js";
 import { getLogger } from "../logging.js";
-import { EXTRACTION_PROMPT_VERSION, loadPrompt } from "../prompts/loader.js";
+import { EXTRACTION_PROMPT_VERSION, format, loadPrompt } from "../prompts/loader.js";
 
 const logger = getLogger("ingestion.extractor");
 
@@ -32,20 +32,50 @@ const MEMORY_CATEGORIES = [
 
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
+const EVENT_DATE_PRECISIONS = ["day", "month", "year", "unknown"] as const;
+export type EventDatePrecision = (typeof EVENT_DATE_PRECISIONS)[number];
+
+// Accept either YYYY-MM-DD or a full ISO datetime; coerce to a Date.
+const EventDateField = z
+  .union([z.string(), z.null()])
+  .optional()
+  .transform((v) => {
+    if (v == null || v === "") return null;
+    const d = new Date(v.length === 10 ? `${v}T00:00:00Z` : v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  });
+
 const ExtractedMemorySchema = z.object({
   content: z.string().min(1),
   category: z.enum(MEMORY_CATEGORIES),
   confidence: z.number().min(0).max(1),
+  event_date: EventDateField,
+  event_date_precision: z.enum(EVENT_DATE_PRECISIONS).optional().default("unknown"),
 });
 
 const ExtractionResponseSchema = z.array(ExtractedMemorySchema);
 
-export type ExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
+type RawExtractedMemory = z.infer<typeof ExtractedMemorySchema>;
+
+export interface ExtractedMemory {
+  content: string;
+  category: MemoryCategory;
+  confidence: number;
+  /** When the described event actually happened, resolved against documentDate. Null for timeless facts. */
+  eventDate: Date | null;
+  eventDatePrecision: EventDatePrecision;
+}
 
 export interface ExtractArgs {
   chunkContent: string;
   /** The session/document text the chunk was drawn from, when available, for context. */
   sourceContext?: string;
+  /**
+   * Date the chunk was authored. The extractor uses this to resolve relative
+   * temporal phrases ("yesterday", "last spring") into absolute event_date
+   * values. Defaults to "today" (UTC) when omitted.
+   */
+  documentDate?: Date;
 }
 
 export interface ExtractDeps {
@@ -54,17 +84,23 @@ export interface ExtractDeps {
   maxTokens?: number;
 }
 
-const SYSTEM_TEMPLATE = loadPrompt("extraction_v1");
+const SYSTEM_TEMPLATE = loadPrompt("extraction_v2");
+
+function isoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
 
 export async function extractMemories(
   deps: ExtractDeps,
   args: ExtractArgs,
 ): Promise<ExtractedMemory[]> {
   const userMessage = `<chunk>\n${args.chunkContent}\n</chunk>`;
+  const documentDate = args.documentDate ?? new Date();
+  const system = format(SYSTEM_TEMPLATE, { document_date: isoDay(documentDate) });
 
   const response = await deps.llm.createMessage({
     model: deps.model,
-    system: SYSTEM_TEMPLATE,
+    system,
     messages: [{ role: "user", content: userMessage }],
     maxTokens: deps.maxTokens ?? 1024,
     temperature: 0,
@@ -85,7 +121,21 @@ export async function extractMemories(
     });
   }
 
-  return result.data;
+  return result.data.map(toExtractedMemory);
+}
+
+function toExtractedMemory(raw: RawExtractedMemory): ExtractedMemory {
+  // If event_date is null, force precision to "unknown" — the model
+  // occasionally emits "day" with a null date and that's nonsense.
+  const eventDate = raw.event_date;
+  const eventDatePrecision: EventDatePrecision = eventDate ? raw.event_date_precision : "unknown";
+  return {
+    content: raw.content,
+    category: raw.category,
+    confidence: raw.confidence,
+    eventDate,
+    eventDatePrecision,
+  };
 }
 
 /**

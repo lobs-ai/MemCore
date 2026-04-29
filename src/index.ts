@@ -78,7 +78,12 @@ export type {
   EdgeType,
   EdgeDirection,
 } from "./retrieval/graph-expander.js";
-export type { ExtractedMemory, MemoryCategory } from "./ingestion/extractor.js";
+export type {
+  ExtractedMemory,
+  MemoryCategory,
+  EventDatePrecision,
+} from "./ingestion/extractor.js";
+export type { DateRange, DateAxis } from "./retrieval/temporal-parser.js";
 export type { Reranker, RerankArgs, RerankDocument, RerankedHit } from "./retrieval/reranker.js";
 export {
   CohereReranker,
