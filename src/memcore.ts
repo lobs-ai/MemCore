@@ -34,7 +34,15 @@ import { OpenAIEmbedder } from "./llm/openai-embedder.js";
 import { OpenAILLMClient } from "./llm/openai-llm-client.js";
 import { StubEmbedder } from "./llm/stub-embedder.js";
 import { getLogger } from "./logging.js";
-import { type MemoryHit, vectorSearchMemories } from "./retrieval/memory-search.js";
+import { keywordSearchMemories } from "./retrieval/keyword-search.js";
+import {
+  type MemoryHit,
+  fetchMemoriesByIds,
+  joinChunksForMemories,
+  vectorSearchMemories,
+} from "./retrieval/memory-search.js";
+import { CohereReranker, PassthroughReranker, type Reranker } from "./retrieval/reranker.js";
+import { fuseRanks } from "./retrieval/rrf.js";
 
 const logger = getLogger("memcore");
 
@@ -79,10 +87,22 @@ export interface MemCoreOptions {
   embeddingDim?: number;
   /** Model name passed to the LLM client for extraction calls. */
   extractionModel?: string;
+  /** Model name passed to the LLM client for chunk contextualization. */
+  contextualizerModel?: string;
   /** Chunker target token count. Defaults to 800. */
   chunkMaxTokens?: number;
   /** Chunker minimum token count below which input becomes a single chunk. Defaults to 100. */
   chunkMinTokens?: number;
+  /**
+   * Reranker for the final stage of search. When omitted and `cohereApiKey`
+   * is set, MemCore builds a `CohereReranker`. When neither is provided, the
+   * pipeline falls back to a no-op passthrough that preserves RRF order.
+   */
+  reranker?: Reranker;
+  /** API key for the default Cohere reranker. */
+  cohereApiKey?: string;
+  /** Reranker model name. Defaults to `rerank-v3.5`. */
+  rerankerModel?: string;
 }
 
 export interface AddArgs {
@@ -117,6 +137,12 @@ export interface SearchResponse {
 }
 
 const DEFAULT_EXTRACTION_MODEL = "gpt-4o-mini";
+const DEFAULT_CONTEXTUALIZER_MODEL = "gpt-4o-mini";
+const DEFAULT_RERANKER_MODEL = "rerank-v3.5";
+
+const HYBRID_VECTOR_TOPK = 50;
+const HYBRID_KEYWORD_TOPK = 50;
+const HYBRID_FUSED_TOPK = 30;
 
 export class MemCore {
   readonly costTracker: CostTracker;
@@ -124,6 +150,8 @@ export class MemCore {
   private readonly embedder: Embedder;
   private readonly llmClient: LLMClient | null;
   private readonly extractionModel: string;
+  private readonly contextualizerModel: string;
+  private readonly reranker: Reranker;
   private readonly chunkOptions: { targetTokens: number; minTokens: number };
 
   constructor(opts: MemCoreOptions) {
@@ -160,6 +188,7 @@ export class MemCore {
     this.embedder = new TrackedEmbedder(baseEmbedder, this.costTracker);
 
     this.extractionModel = opts.extractionModel ?? DEFAULT_EXTRACTION_MODEL;
+    this.contextualizerModel = opts.contextualizerModel ?? DEFAULT_CONTEXTUALIZER_MODEL;
 
     const llmKey = opts.openaiApiKey;
     if (opts.llmClient) {
@@ -184,6 +213,17 @@ export class MemCore {
       targetTokens: opts.chunkMaxTokens ?? 800,
       minTokens: opts.chunkMinTokens ?? 100,
     };
+
+    if (opts.reranker) {
+      this.reranker = opts.reranker;
+    } else if (opts.cohereApiKey) {
+      this.reranker = new CohereReranker({
+        apiKey: opts.cohereApiKey,
+        model: opts.rerankerModel ?? DEFAULT_RERANKER_MODEL,
+      });
+    } else {
+      this.reranker = new PassthroughReranker();
+    }
   }
 
   /** Ingest content into memory. Returns the conversation id and ingestion status. */
@@ -212,7 +252,10 @@ export class MemCore {
         embedder: this.embedder,
         chunkOptions: this.chunkOptions,
         ...(this.llmClient
-          ? { extractor: { llm: this.llmClient, model: this.extractionModel } }
+          ? {
+              extractor: { llm: this.llmClient, model: this.extractionModel },
+              contextualizer: { llm: this.llmClient, model: this.contextualizerModel },
+            }
           : {}),
       },
       ingestArgs,
@@ -220,8 +263,12 @@ export class MemCore {
   }
 
   /**
-   * Search memory. Phase 2: vector search over `memories`, with source chunks
-   * joined when `includeChunks` is true (default).
+   * Search memory. Phase 3 hybrid pipeline:
+   *   1. Embed the query.
+   *   2. Vector search (top 50) and keyword search (top 50) in parallel.
+   *   3. Fuse with RRF; take top 30.
+   *   4. Cross-encoder rerank to top `limit`.
+   *   5. Join source chunks if requested.
    */
   async search(args: SearchArgs): Promise<SearchResponse> {
     if (!args.containerTag) throw new ValidationError("containerTag is required");
@@ -240,22 +287,86 @@ export class MemCore {
         queryMetadata: { totalCandidates: 0, latencyMs: Math.round(performance.now() - start) },
       };
     }
+    const containerId = containerRow[0].id;
 
+    // Embed the query, then run vector + keyword in parallel against memories.
     const embeddingResponse = await this.embedder.embed({ texts: [args.query] });
     const queryVector = embeddingResponse.vectors[0];
     if (!queryVector) throw new ValidationError("embedder returned no vector for query");
 
-    const hits = await vectorSearchMemories(this.sql, {
-      containerId: containerRow[0].id,
-      queryVector,
-      limit,
-      includeChunks,
+    const [vectorHits, keywordHits] = await Promise.all([
+      vectorSearchMemories(this.sql, {
+        containerId,
+        queryVector,
+        limit: HYBRID_VECTOR_TOPK,
+        includeChunks: false,
+      }),
+      keywordSearchMemories(this.sql, {
+        containerId,
+        query: args.query,
+        limit: HYBRID_KEYWORD_TOPK,
+      }),
+    ]);
+
+    // Track content per memory id so the reranker has text to score against
+    // without a second round-trip.
+    const contentById = new Map<string, string>();
+    for (const h of vectorHits) contentById.set(h.id, h.content);
+    for (const h of keywordHits) contentById.set(h.id, h.content);
+
+    const fused = fuseRanks([vectorHits.map((h) => h.id), keywordHits.map((h) => h.id)], {
+      limit: HYBRID_FUSED_TOPK,
     });
 
+    if (fused.length === 0) {
+      return {
+        results: [],
+        queryMetadata: { totalCandidates: 0, latencyMs: Math.round(performance.now() - start) },
+      };
+    }
+
+    // Cross-encoder rerank.
+    const rerankInput = fused.map((f) => ({
+      id: f.id,
+      text: contentById.get(f.id) ?? "",
+    }));
+    const reranked = await this.reranker.rerank({
+      query: args.query,
+      documents: rerankInput,
+      topN: limit,
+    });
+
+    if (reranked.length === 0) {
+      return {
+        results: [],
+        queryMetadata: {
+          totalCandidates: fused.length,
+          latencyMs: Math.round(performance.now() - start),
+        },
+      };
+    }
+
+    // Hydrate full memory rows + chunks for the survivors.
+    const winnerIds = reranked.map((r) => r.id);
+    const memoryMap = await fetchMemoriesByIds(this.sql, containerId, winnerIds);
+    const chunkMap = includeChunks ? await joinChunksForMemories(this.sql, winnerIds) : new Map();
+
+    const results: SearchResult[] = [];
+    for (const r of reranked) {
+      const m = memoryMap.get(r.id);
+      if (!m) continue;
+      const memory: MemoryHit = {
+        ...m,
+        score: r.score,
+        chunks: chunkMap.get(r.id) ?? [],
+      };
+      results.push({ memory, score: r.score });
+    }
+
     return {
-      results: hits.map((memory) => ({ memory, score: memory.score })),
+      results,
       queryMetadata: {
-        totalCandidates: hits.length,
+        totalCandidates: fused.length,
         latencyMs: Math.round(performance.now() - start),
       },
     };

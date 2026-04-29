@@ -4,7 +4,7 @@ This document defines the phased build plan for **MemCore**. Phases are sequenti
 
 For *what* to build, see `SPEC.md`. For *why*, see `DESIGN.md`. For *how* to work in this repo, see `AGENTS.md`.
 
-**Current phase: Phase 2 in progress** — code/schema/queue landed; eval baseline pending an OPENAI_API_KEY (or injected `LLMClient`) so extraction can run end-to-end.
+**Current phase: Phase 3 in progress** — contextualizer, hybrid search (vector + tsvector + RRF), reranker, and reingest script landed. Vector index is still opt-in via `pnpm db:vector-index`. Eval delta vs Phase 2 pending an `OPENAI_API_KEY` (and a `COHERE_API_KEY` for the cross-encoder; without it the pipeline falls back to a passthrough reranker and only measures the vector+keyword+RRF improvement).
 
 ---
 

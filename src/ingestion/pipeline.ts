@@ -28,6 +28,7 @@ import { EmbeddingError, IngestionError } from "../errors.js";
 import type { Embedder } from "../llm/embedder.js";
 import { getLogger } from "../logging.js";
 import { chunkText } from "./chunker.js";
+import { type ContextualizeDeps, contextualizeChunks } from "./contextualizer.js";
 import {
   EXTRACTION_PROMPT_VERSION,
   type ExtractDeps,
@@ -76,6 +77,12 @@ export interface IngestDeps {
    * is configured, or callers that want raw RAG.
    */
   extractor?: ExtractDeps;
+  /**
+   * Contextualizer configuration. When present, each chunk gets a 1–2 sentence
+   * prefix generated against the full session and embeds use `prefix + content`.
+   * When omitted, chunks are embedded as raw content (Phase 1/2 behaviour).
+   */
+  contextualizer?: ContextualizeDeps;
 }
 
 function contentHash(text: string): string {
@@ -106,8 +113,13 @@ interface ChunkPlan {
   position: number;
   tokenCount: number;
   hash: string;
+  contextualPrefix: string | null;
   vector: number[];
   memories: ExtractedMemory[];
+}
+
+function chunkEmbeddingInput(content: string, contextualPrefix: string | null): string {
+  return contextualPrefix ? `${contextualPrefix}\n\n${content}` : content;
 }
 
 export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<IngestResult> {
@@ -127,8 +139,22 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     });
   }
 
-  // Stage: embed chunks.
-  const chunkEmbeddings = await deps.embedder.embed({ texts: chunks.map((c) => c.content) });
+  // Stage: contextualize chunks. Skipped when no contextualizer is configured;
+  // also skipped per-chunk for very short chunks (<50 tokens). Failures degrade
+  // to a null prefix so one bad LLM call doesn't lose the whole session.
+  let prefixes: (string | null)[] = new Array(chunks.length).fill(null);
+  if (deps.contextualizer) {
+    prefixes = await contextualizeChunks(deps.contextualizer, {
+      sessionText: text,
+      chunks: chunks.map((c) => ({ content: c.content, tokenCount: c.tokenCount })),
+    });
+  }
+
+  // Stage: embed chunks. Embedding input is `prefix + content` when we have a
+  // prefix — that's the whole point of contextual retrieval.
+  const chunkEmbeddings = await deps.embedder.embed({
+    texts: chunks.map((c, i) => chunkEmbeddingInput(c.content, prefixes[i] ?? null)),
+  });
   if (chunkEmbeddings.vectors.length !== chunks.length) {
     throw new EmbeddingError("embedder returned wrong number of vectors", {
       expected: chunks.length,
@@ -153,6 +179,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       position: chunk.position,
       tokenCount: chunk.tokenCount,
       hash: contentHash(chunk.content),
+      contextualPrefix: prefixes[i] ?? null,
       vector,
       memories,
     });
@@ -228,10 +255,11 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       const inserted = await tx<{ id: string }[]>`
         INSERT INTO chunks (
           container_id, conversation_id, source_type, source_id, content,
-          embedding, content_hash, position, document_date, metadata
+          contextual_prefix, embedding, content_hash, position, document_date, metadata
         ) VALUES (
           ${container.id}, ${conversation.id}, ${args.sourceType},
           ${args.externalId ?? null}, ${plan.content},
+          ${plan.contextualPrefix},
           ${vectorLiteral(plan.vector)}::vector,
           ${plan.hash}, ${plan.position}, ${args.documentDate ?? null},
           ${tx.json({ tokenCount: plan.tokenCount } as never)}

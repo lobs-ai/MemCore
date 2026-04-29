@@ -34,6 +34,7 @@
     "test:watch": "vitest",
     "db:reset": "tsx db/reset.ts",
     "db:vector-index": "tsx scripts/create-vector-index.ts",
+    "reingest": "tsx scripts/reingest.ts",
     "eval": "tsx evals/runner.ts"
   },
   "dependencies": {

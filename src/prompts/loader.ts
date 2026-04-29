@@ -30,3 +30,4 @@ export function format(template: string, vars: Record<string, string>): string {
 }
 
 export const EXTRACTION_PROMPT_VERSION = "v1";
+export const CONTEXTUALIZER_PROMPT_VERSION = "v1";

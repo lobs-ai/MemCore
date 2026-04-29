@@ -131,6 +131,9 @@ async function main(): Promise<void> {
     embeddingBaseUrl: settings.embeddingBaseUrl,
     embeddingModel: settings.embeddingModel,
     embeddingDim: settings.embeddingDim,
+    extractionModel: settings.extractionModel,
+    contextualizerModel: settings.contextualizerModel,
+    cohereApiKey: settings.cohereApiKey,
     chunkMaxTokens: settings.chunkMaxTokens,
     chunkMinTokens: settings.chunkMinTokens,
   });

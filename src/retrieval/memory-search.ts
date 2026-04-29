@@ -6,9 +6,10 @@
  * is the two-layer model from DESIGN.md — atomic facts for matching, raw
  * chunks for context.
  *
- * No ANN index in Phase 2 for the same reason as Phase 1: 3072-dim default
- * exceeds pgvector's per-op-class caps. Hybrid search + halfvec HNSW arrives
- * in Phase 3.
+ * Phase 3: this module is the "vector leg" of hybrid retrieval. The pipeline
+ * runs vector and keyword searches in parallel, fuses the rankings via RRF,
+ * reranks the top fused candidates, and only then joins source chunks. The
+ * `joinChunksForMemories` helper handles that last step.
  */
 
 import type postgres from "postgres";
@@ -143,4 +144,79 @@ export async function vectorSearchMemories(
     score: Math.max(0, 1 - Number(row.distance)),
     chunks: chunkMap.get(row.id) ?? [],
   }));
+}
+
+/**
+ * Hydrate memory rows by id, preserving the caller's order. Used by the
+ * hybrid pipeline after RRF + rerank when we already have the winning ids.
+ */
+export async function fetchMemoriesByIds(
+  sql: postgres.Sql,
+  containerId: string,
+  ids: string[],
+): Promise<Map<string, Omit<MemoryHit, "score" | "chunks">>> {
+  if (ids.length === 0) return new Map();
+  const rows = await sql<Omit<MemorySearchRow, "distance">[]>`
+    SELECT
+      id, content, category, status, version, confidence,
+      document_date, event_date, event_date_precision,
+      prompt_version, extractor_model
+    FROM memories
+    WHERE container_id = ${containerId} AND id IN ${sql(ids)}
+  `;
+  const out = new Map<string, Omit<MemoryHit, "score" | "chunks">>();
+  for (const row of rows) {
+    out.set(row.id, {
+      id: row.id,
+      content: row.content,
+      category: row.category,
+      status: row.status,
+      version: row.version,
+      confidence: Number(row.confidence),
+      documentDate: row.document_date,
+      eventDate: row.event_date,
+      eventDatePrecision: row.event_date_precision,
+      promptVersion: row.prompt_version,
+      extractorModel: row.extractor_model,
+    });
+  }
+  return out;
+}
+
+/**
+ * Pull source chunks for a set of memory ids, returning a map keyed by
+ * memory id. Order within each list follows `memory_chunks.relevance` desc.
+ */
+export async function joinChunksForMemories(
+  sql: postgres.Sql,
+  memoryIds: string[],
+): Promise<Map<string, ChunkRef[]>> {
+  const out = new Map<string, ChunkRef[]>();
+  if (memoryIds.length === 0) return out;
+  const rows = await sql<ChunkJoinRow[]>`
+    SELECT
+      mc.memory_id, mc.chunk_id, mc.relevance,
+      c.content, c.contextual_prefix, c.position, c.conversation_id,
+      c.source_type, c.source_id, c.document_date
+    FROM memory_chunks mc
+    JOIN chunks c ON c.id = mc.chunk_id
+    WHERE mc.memory_id IN ${sql(memoryIds)}
+    ORDER BY mc.relevance DESC
+  `;
+  for (const row of rows) {
+    const list = out.get(row.memory_id) ?? [];
+    list.push({
+      id: row.chunk_id,
+      content: row.content,
+      contextualPrefix: row.contextual_prefix,
+      position: row.position,
+      conversationId: row.conversation_id,
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      documentDate: row.document_date,
+      relevance: Number(row.relevance),
+    });
+    out.set(row.memory_id, list);
+  }
+  return out;
 }
