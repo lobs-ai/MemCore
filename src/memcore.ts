@@ -34,6 +34,8 @@ import { OpenAIEmbedder } from "./llm/openai-embedder.js";
 import { OpenAILLMClient } from "./llm/openai-llm-client.js";
 import { StubEmbedder } from "./llm/stub-embedder.js";
 import { getLogger } from "./logging.js";
+import { type ProfileRecord, generateProfile, getProfileByContainer } from "./profile/generator.js";
+import { isProfileRelevant } from "./profile/relevance.js";
 import { type RelatedMemory, expandGraph } from "./retrieval/graph-expander.js";
 import { keywordSearchMemories } from "./retrieval/keyword-search.js";
 import {
@@ -118,6 +120,22 @@ export interface MemCoreOptions {
   cohereApiKey?: string;
   /** Reranker model name. Defaults to `rerank-v3.5`. */
   rerankerModel?: string;
+  /** Model name passed to the LLM client for profile generation (Phase 6). */
+  profileGeneratorModel?: string;
+  /**
+   * Cap on the number of active memories handed to the profile generator in a
+   * single call. Default 200. Larger containers truncate to the top-N by the
+   * generator's internal ordering (category priority, recency).
+   */
+  profileMaxMemories?: number;
+  /**
+   * Phase 6 abstain gate. When the top vector-search cosine similarity is
+   * below this floor, `search()` returns `shouldAbstain: true` and an empty
+   * results list — the caller can use that to skip the LLM round-trip and
+   * answer "I don't have anything on that." Default 0.3 (calibrated to
+   * `text-embedding-3-large`); set to 0 to disable.
+   */
+  abstainSimilarityFloor?: number;
 }
 
 export interface AddArgs {
@@ -153,6 +171,20 @@ export interface SearchArgs {
    * `null` to disable both the parser and any auto-detected range.
    */
   dateRange?: DateRange | null;
+  /**
+   * Phase 6: when true (the default), MemCore checks whether the query is
+   * profile-relevant ("what do you know about me?") and, if a profile row
+   * exists for the container, attaches it to the response under `profile`.
+   * Pass false to skip the heuristic and never inject the profile.
+   */
+  includeProfile?: boolean;
+}
+
+export interface SearchProfileEnvelope {
+  content: string;
+  version: number;
+  generatedAt: Date;
+  sourceMemoryCount: number;
 }
 
 export interface SearchResult {
@@ -164,11 +196,34 @@ export interface SearchResult {
 
 export interface SearchResponse {
   results: SearchResult[];
+  /**
+   * Profile envelope, populated when the query was profile-relevant and a
+   * profile row exists for the container. Null otherwise. The profile is a
+   * narrative summary of the user's durable traits — see Phase 6 in ROADMAP.
+   */
+  profile?: SearchProfileEnvelope | null;
   queryMetadata: {
     totalCandidates: number;
     latencyMs: number;
     /** Range that was applied to the candidate set, if any. */
     dateRange?: DateRange | null;
+    /**
+     * True when MemCore decided the query is unanswerable from memory: either
+     * no candidates survived RRF / temporal filtering, or the strongest
+     * vector-search hit's cosine similarity was below `abstainSimilarityFloor`.
+     * Callers should treat this as "no relevant memories" and answer the user
+     * directly rather than fabricating from a thin context.
+     */
+    shouldAbstain: boolean;
+    /**
+     * The reason for `shouldAbstain`. `null` when shouldAbstain is false.
+     * `"no_candidates"` when nothing survived candidate generation /
+     * filtering. `"low_similarity"` when the top vector hit was below the
+     * abstain floor. Useful for telemetry and tuning.
+     */
+    abstainReason: "no_candidates" | "low_similarity" | null;
+    /** True when the profile-relevance heuristic fired on this query. */
+    profileRelevant: boolean;
   };
 }
 
@@ -176,7 +231,9 @@ const DEFAULT_EXTRACTION_MODEL = "gpt-4o-mini";
 const DEFAULT_CONTEXTUALIZER_MODEL = "gpt-4o-mini";
 const DEFAULT_CONFLICT_MODEL = "gpt-4o-mini";
 const DEFAULT_TEMPORAL_PARSER_MODEL = "gpt-4o-mini";
+const DEFAULT_PROFILE_GENERATOR_MODEL = "gpt-4o-mini";
 const DEFAULT_RERANKER_MODEL = "rerank-v3.5";
+const DEFAULT_ABSTAIN_SIMILARITY_FLOOR = 0.3;
 
 const HYBRID_VECTOR_TOPK = 50;
 const HYBRID_KEYWORD_TOPK = 50;
@@ -195,6 +252,9 @@ export class MemCore {
   private readonly conflictTopK: number | undefined;
   private readonly reranker: Reranker;
   private readonly chunkOptions: { targetTokens: number; minTokens: number };
+  private readonly profileGeneratorModel: string;
+  private readonly profileMaxMemories: number | undefined;
+  private readonly abstainSimilarityFloor: number;
 
   constructor(opts: MemCoreOptions) {
     if (!opts.databaseUrl) throw new ValidationError("databaseUrl is required");
@@ -233,6 +293,9 @@ export class MemCore {
     this.contextualizerModel = opts.contextualizerModel ?? DEFAULT_CONTEXTUALIZER_MODEL;
     this.conflictModel = opts.conflictModel ?? DEFAULT_CONFLICT_MODEL;
     this.temporalParserModel = opts.temporalParserModel ?? DEFAULT_TEMPORAL_PARSER_MODEL;
+    this.profileGeneratorModel = opts.profileGeneratorModel ?? DEFAULT_PROFILE_GENERATOR_MODEL;
+    this.profileMaxMemories = opts.profileMaxMemories;
+    this.abstainSimilarityFloor = opts.abstainSimilarityFloor ?? DEFAULT_ABSTAIN_SIMILARITY_FLOOR;
     this.conflictSimilarityThreshold = opts.conflictSimilarityThreshold;
     this.conflictTopK = opts.conflictTopK;
 
@@ -317,15 +380,19 @@ export class MemCore {
   }
 
   /**
-   * Search memory. Phase 5 pipeline:
+   * Search memory. Phase 6 pipeline:
    *   0. Parse temporal scope (skipped when an explicit dateRange is supplied
    *      or the caller passed `null` to opt out, or no LLM is configured).
+   *      In parallel, run the profile-relevance heuristic on the query.
    *   1. Embed the query.
    *   2. Vector search (top 50) and keyword search (top 50) in parallel.
    *   3. Fuse with RRF; take top 30.
    *   4. Apply temporal filter (when active).
    *   5. Cross-encoder rerank to top `limit`.
    *   6. Join source chunks if requested.
+   *   7. If the query was profile-relevant, attach the container's profile.
+   *   8. Compute `shouldAbstain` from the candidate pool and the top vector
+   *      similarity.
    */
   async search(args: SearchArgs): Promise<SearchResponse> {
     if (!args.containerTag) throw new ValidationError("containerTag is required");
@@ -333,9 +400,12 @@ export class MemCore {
     const limit = args.limit ?? 10;
     const includeChunks = args.includeChunks ?? true;
     const includeGraph = args.expandGraph ?? false;
+    const includeProfile = args.includeProfile ?? true;
     // Caller passed an explicit `null` — disable both auto-parse and any range.
     const callerDisabledTemporal = args.dateRange === null;
     const callerProvidedRange = args.dateRange ?? null;
+
+    const profileMatch = isProfileRelevant(args.query);
 
     const start = performance.now();
 
@@ -345,7 +415,14 @@ export class MemCore {
     if (!containerRow[0]) {
       return {
         results: [],
-        queryMetadata: { totalCandidates: 0, latencyMs: Math.round(performance.now() - start) },
+        profile: null,
+        queryMetadata: {
+          totalCandidates: 0,
+          latencyMs: Math.round(performance.now() - start),
+          shouldAbstain: true,
+          abstainReason: "no_candidates",
+          profileRelevant: profileMatch.isRelevant,
+        },
       };
     }
     const containerId = containerRow[0].id;
@@ -370,7 +447,7 @@ export class MemCore {
 
     const activeRange: DateRange | null = callerProvidedRange ?? parsedRange ?? null;
 
-    const [vectorHits, keywordHits] = await Promise.all([
+    const [vectorHits, keywordHits, profileRow] = await Promise.all([
       vectorSearchMemories(this.sql, {
         containerId,
         queryVector,
@@ -382,7 +459,20 @@ export class MemCore {
         query: args.query,
         limit: HYBRID_KEYWORD_TOPK,
       }),
+      includeProfile && profileMatch.isRelevant
+        ? getProfileByContainer(this.sql, containerId)
+        : Promise.resolve(null),
     ]);
+
+    const topVectorSimilarity = vectorHits[0]?.score ?? 0;
+    const profileEnvelope: SearchProfileEnvelope | null = profileRow
+      ? {
+          content: profileRow.content,
+          version: profileRow.version,
+          generatedAt: profileRow.generatedAt,
+          sourceMemoryCount: profileRow.sourceMemoryCount,
+        }
+      : null;
 
     // Track content per memory id so the reranker has text to score against
     // without a second round-trip.
@@ -397,10 +487,14 @@ export class MemCore {
     if (fused.length === 0) {
       return {
         results: [],
+        profile: profileEnvelope,
         queryMetadata: {
           totalCandidates: 0,
           latencyMs: Math.round(performance.now() - start),
           dateRange: activeRange,
+          shouldAbstain: true,
+          abstainReason: "no_candidates",
+          profileRelevant: profileMatch.isRelevant,
         },
       };
     }
@@ -421,10 +515,14 @@ export class MemCore {
     if (surviving.length === 0) {
       return {
         results: [],
+        profile: profileEnvelope,
         queryMetadata: {
           totalCandidates: fused.length,
           latencyMs: Math.round(performance.now() - start),
           dateRange: activeRange,
+          shouldAbstain: true,
+          abstainReason: "no_candidates",
+          profileRelevant: profileMatch.isRelevant,
         },
       };
     }
@@ -443,10 +541,14 @@ export class MemCore {
     if (reranked.length === 0) {
       return {
         results: [],
+        profile: profileEnvelope,
         queryMetadata: {
           totalCandidates: fused.length,
           latencyMs: Math.round(performance.now() - start),
           dateRange: activeRange,
+          shouldAbstain: true,
+          abstainReason: "no_candidates",
+          profileRelevant: profileMatch.isRelevant,
         },
       };
     }
@@ -478,14 +580,71 @@ export class MemCore {
       });
     }
 
+    // Phase 6 abstain: even with non-empty results, the answer may be junk
+    // when the strongest vector hit is far from the query. The threshold is
+    // tuned to OpenAI embeddings (~0.3 = "vaguely related"); set to 0 in
+    // options to disable this gate. Profile-relevant queries skip the floor —
+    // the profile itself is the relevant return, regardless of how the
+    // memory pool scored.
+    const lowSimilarity =
+      this.abstainSimilarityFloor > 0 &&
+      topVectorSimilarity < this.abstainSimilarityFloor &&
+      !profileMatch.isRelevant;
+
     return {
-      results,
+      results: lowSimilarity ? [] : results,
+      profile: profileEnvelope,
       queryMetadata: {
         totalCandidates: fused.length,
         latencyMs: Math.round(performance.now() - start),
         dateRange: activeRange,
+        shouldAbstain: lowSimilarity,
+        abstainReason: lowSimilarity ? "low_similarity" : null,
+        profileRelevant: profileMatch.isRelevant,
       },
     };
+  }
+
+  /**
+   * Build (or rebuild) the profile for a container. Pulls every active memory,
+   * runs the profile prompt, and upserts a single `profiles` row. Returns null
+   * when the container has no memories yet, or when no LLM client is
+   * configured (the profile generator needs an LLM round-trip).
+   *
+   * Intended to run on a schedule (cron, BullMQ repeat job, etc.) rather than
+   * inline with each search — generation is the dominant cost. Callers can
+   * trigger it manually after a long ingestion to refresh the profile sooner.
+   */
+  async buildProfile(args: { containerTag: string; now?: Date }): Promise<ProfileRecord | null> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    if (!this.llmClient) {
+      logger.warn({ containerTag: args.containerTag }, "build_profile_skipped_no_llm_client");
+      return null;
+    }
+    const containerRow = await this.sql<{ id: string }[]>`
+      SELECT id FROM containers WHERE tag = ${args.containerTag} LIMIT 1
+    `;
+    if (!containerRow[0]) return null;
+    const containerId = containerRow[0].id;
+    return generateProfile(
+      this.sql,
+      {
+        llm: this.llmClient,
+        model: this.profileGeneratorModel,
+        ...(this.profileMaxMemories !== undefined ? { maxMemories: this.profileMaxMemories } : {}),
+      },
+      { containerId, ...(args.now ? { now: args.now } : {}) },
+    );
+  }
+
+  /** Fetch the stored profile for a container, or null if none has been built. */
+  async getProfile(args: { containerTag: string }): Promise<ProfileRecord | null> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    const containerRow = await this.sql<{ id: string }[]>`
+      SELECT id FROM containers WHERE tag = ${args.containerTag} LIMIT 1
+    `;
+    if (!containerRow[0]) return null;
+    return getProfileByContainer(this.sql, containerRow[0].id);
   }
 
   /** Health check. Resolves with `true` when the database is reachable. */

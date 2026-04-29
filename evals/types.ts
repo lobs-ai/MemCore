@@ -14,7 +14,7 @@ export type Category =
   | "multi_session"
   | "abstain";
 
-export type ScoringMode = "contains" | "exact";
+export type ScoringMode = "contains" | "exact" | "abstain";
 
 export interface EvalCase {
   case_id: string;
@@ -44,5 +44,6 @@ export interface EvalResult {
   passed: boolean;
   retrievedTopK: { content: string; score: number }[];
   latencyMs: number;
+  shouldAbstain?: boolean;
   notes?: string;
 }

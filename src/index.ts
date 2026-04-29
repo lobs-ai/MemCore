@@ -22,6 +22,7 @@ export type {
   SearchArgs,
   SearchResult,
   SearchResponse,
+  SearchProfileEnvelope,
 } from "./memcore.js";
 
 // LLM-side surface so callers can plug their own embedder/LLM.
@@ -84,6 +85,8 @@ export type {
   EventDatePrecision,
 } from "./ingestion/extractor.js";
 export type { DateRange, DateAxis } from "./retrieval/temporal-parser.js";
+export type { ProfileRecord, ProfileMemoryRow } from "./profile/generator.js";
+export { isProfileRelevant, type RelevanceMatch } from "./profile/relevance.js";
 export type { Reranker, RerankArgs, RerankDocument, RerankedHit } from "./retrieval/reranker.js";
 export {
   CohereReranker,

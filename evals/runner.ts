@@ -61,7 +61,19 @@ function loadCases(category: string | null): EvalCase[] {
   return cases;
 }
 
-function score(c: EvalCase, retrievedContents: string[]): boolean {
+function score(
+  c: EvalCase,
+  retrievedContents: string[],
+  shouldAbstain: boolean,
+  resultsCount: number,
+): boolean {
+  // Abstain category: the answer is "I don't know". The search path is
+  // expected to flag the query as unanswerable from memory, OR (equivalently)
+  // return zero results. Surfacing memory content for an abstain case is the
+  // failure mode we care about here — that's a hallucination risk downstream.
+  if (c.scoring === "abstain" || c.category === "abstain") {
+    return shouldAbstain || resultsCount === 0;
+  }
   const expected = c.expected_answer.toLowerCase();
   if (c.scoring === "contains") {
     return retrievedContents.some((s) => s.toLowerCase().includes(expected));
@@ -88,7 +100,8 @@ async function runCase(memcore: MemCore, containerTag: string, c: EvalCase): Pro
     r.memory.content,
     ...r.memory.chunks.map((ch) => ch.content),
   ]);
-  const passed = score(c, retrievedContents);
+  const shouldAbstain = result.queryMetadata.shouldAbstain;
+  const passed = score(c, retrievedContents, shouldAbstain, result.results.length);
 
   return {
     case_id: c.case_id,
@@ -96,6 +109,7 @@ async function runCase(memcore: MemCore, containerTag: string, c: EvalCase): Pro
     passed,
     retrievedTopK: result.results.map((r) => ({ content: r.memory.content, score: r.score })),
     latencyMs,
+    shouldAbstain,
   };
 }
 

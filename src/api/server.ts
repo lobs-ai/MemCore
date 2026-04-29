@@ -22,6 +22,7 @@ import type { MemCore } from "../memcore.js";
 import type { IngestionProducer } from "../queue/producer.js";
 import { registerAddRoute } from "./routes/add.js";
 import { registerHealthRoute } from "./routes/health.js";
+import { registerProfileRoutes } from "./routes/profiles.js";
 import { registerSearchRoute } from "./routes/search.js";
 
 const logger = getLogger("api.server");
@@ -98,6 +99,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       registerHealthRoute(scope);
       registerAddRoute(scope);
       registerSearchRoute(scope);
+      registerProfileRoutes(scope);
     },
     { prefix: "/v1" },
   );

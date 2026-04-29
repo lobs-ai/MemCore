@@ -21,6 +21,7 @@ const SearchRequest = z.object({
   limit: z.number().int().positive().max(100).default(10),
   include_chunks: z.boolean().default(true),
   expand_graph: z.boolean().default(false),
+  include_profile: z.boolean().default(true),
   filters: z
     .object({
       date_range: DateRangeRequest.nullable().optional(),
@@ -67,6 +68,13 @@ const DateRangeResponse = z.object({
   to: z.string().datetime().nullable(),
 });
 
+const ProfileEnvelopeResponse = z.object({
+  content: z.string(),
+  version: z.number(),
+  generated_at: z.string().datetime(),
+  source_memory_count: z.number(),
+});
+
 const SearchResponse = z.object({
   results: z.array(
     z.object({
@@ -76,10 +84,14 @@ const SearchResponse = z.object({
       related_memories: z.array(RelatedMemoryResponse),
     }),
   ),
+  profile: ProfileEnvelopeResponse.nullable(),
   query_metadata: z.object({
     total_candidates: z.number(),
     latency_ms: z.number(),
     date_range: DateRangeResponse.nullable().optional(),
+    should_abstain: z.boolean(),
+    abstain_reason: z.enum(["no_candidates", "low_similarity"]).nullable(),
+    profile_relevant: z.boolean(),
   }),
 });
 
@@ -113,6 +125,7 @@ export function registerSearchRoute(app: FastifyInstance): void {
         limit: body.limit,
         includeChunks: body.include_chunks,
         expandGraph: body.expand_graph,
+        includeProfile: body.include_profile,
         ...(dateRange === undefined ? {} : { dateRange }),
       });
 
@@ -164,6 +177,14 @@ export function registerSearchRoute(app: FastifyInstance): void {
             edge_confidence: rm.edgeConfidence,
           })),
         })),
+        profile: result.profile
+          ? {
+              content: result.profile.content,
+              version: result.profile.version,
+              generated_at: result.profile.generatedAt.toISOString(),
+              source_memory_count: result.profile.sourceMemoryCount,
+            }
+          : null,
         query_metadata: {
           total_candidates: result.queryMetadata.totalCandidates,
           latency_ms: result.queryMetadata.latencyMs,
@@ -178,6 +199,9 @@ export function registerSearchRoute(app: FastifyInstance): void {
                   : null,
               }
             : null,
+          should_abstain: result.queryMetadata.shouldAbstain,
+          abstain_reason: result.queryMetadata.abstainReason,
+          profile_relevant: result.queryMetadata.profileRelevant,
         },
       };
     },

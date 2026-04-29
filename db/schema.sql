@@ -20,10 +20,17 @@
 --   edges           typed memory→memory relationships (updates / extends /
 --                   derives / contradicts), built by the conflict detector
 --                   during ingestion and traversed one-hop at query time.
+--
+-- Phase 6 tables (added):
+--   profiles        per-container summary of the user's durable traits, built
+--                   from the active memories. One row per container; rebuilt
+--                   on demand (or on a schedule) and injected into search
+--                   responses for profile-relevant queries.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+DROP TABLE IF EXISTS profiles CASCADE;
 DROP TABLE IF EXISTS edges CASCADE;
 DROP TABLE IF EXISTS memory_chunks CASCADE;
 DROP TABLE IF EXISTS memories CASCADE;
@@ -155,3 +162,25 @@ CREATE TABLE edges (
 );
 CREATE INDEX ix_edges_source_memory_id ON edges(source_memory_id);
 CREATE INDEX ix_edges_target_memory_id ON edges(target_memory_id);
+
+-- profiles: a stable summary of the user's durable traits, generated from the
+-- active memories in a container. One row per container (ON CONFLICT upserts).
+-- Built on demand via MemCore.buildProfile() and injected into search results
+-- when the query is profile-relevant ("what do you know about me?", etc.).
+--
+-- source_memory_ids records which memory ids fed the generation so the caller
+-- can attribute (and detect when the underlying memories have shifted enough
+-- to warrant a rebuild). version increments on every regeneration.
+CREATE TABLE profiles (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  container_id        UUID NOT NULL UNIQUE REFERENCES containers(id) ON DELETE CASCADE,
+  content             TEXT NOT NULL,
+  source_memory_ids   UUID[] NOT NULL DEFAULT '{}',
+  source_memory_count INTEGER NOT NULL DEFAULT 0,
+  version             INTEGER NOT NULL DEFAULT 1,
+  prompt_version      TEXT NOT NULL,
+  generator_model     TEXT NOT NULL,
+  generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata            JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX ix_profiles_container_id ON profiles(container_id);
