@@ -128,7 +128,7 @@ The same shape works for **Ollama** (`http://localhost:11434/v1`), **vLLM**, **l
 
 | `EMBEDDING_DIM` | Index                                                        |
 | --------------- | ------------------------------------------------------------ |
-| ≤ 2000          | HNSW over `embedding vector_cosine_ops`                      |
+| ≤ 2000          | HNSW over `embedding::vector(N) vector_cosine_ops`           |
 | 2001..4000      | HNSW over `embedding::halfvec(N) halfvec_cosine_ops` (16-bit) |
 | > 4000          | HNSW over `binary_quantize(embedding)::bit(N) bit_hamming_ops` + cosine rerank |
 

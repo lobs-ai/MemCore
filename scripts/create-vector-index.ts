@@ -47,13 +47,16 @@ interface Strategy {
 
 function pickStrategy(dim: number): Strategy {
   if (dim <= 2000) {
+    // The column is unbounded `VECTOR` (so we can swap models without DDL),
+    // and `vector_cosine_ops` needs a typed dim — so we cast at the index.
     return {
       tier: "vector",
       createSql: `
         CREATE INDEX ${INDEX_NAME} ON chunks
-        USING hnsw (embedding vector_cosine_ops)
+        USING hnsw ((embedding::vector(${dim})) vector_cosine_ops)
       `,
-      queryNote: "Query with `embedding <=> $vec::vector`. No cast needed.",
+      queryNote:
+        "Query with `embedding::vector(N) <=> $vec::vector(N)` so the planner picks this index.",
     };
   }
   if (dim <= 4000) {

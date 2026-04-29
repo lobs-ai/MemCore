@@ -62,7 +62,7 @@ CREATE INDEX ix_messages_conversation_id ON messages(conversation_id);
 -- (`scripts/create-vector-index.ts`) which picks the right strategy from
 -- `EMBEDDING_DIM`:
 --
---   ≤ 2000       HNSW over (embedding vector_cosine_ops)
+--   ≤ 2000       HNSW over (embedding::vector(N) vector_cosine_ops)
 --   2001..4000   HNSW over (embedding::halfvec(N) halfvec_cosine_ops)
 --   > 4000       HNSW over (binary_quantize(embedding)::bit(N) bit_hamming_ops)
 --                  + exact-cosine rerank stage

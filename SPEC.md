@@ -457,7 +457,7 @@ Latency budget:
 
 | `EMBEDDING_DIM` | Index                                                                          | Query operator                                              | Recall vs. exact |
 | --------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------- | ---------------- |
-| ≤ 2000          | `HNSW(embedding vector_cosine_ops)`                                            | `embedding <=> $vec::vector`                                | exact            |
+| ≤ 2000          | `HNSW((embedding::vector(N)) vector_cosine_ops)`                               | `embedding::vector(N) <=> $vec::vector(N)`                  | exact            |
 | 2001..4000      | `HNSW((embedding::halfvec(N)) halfvec_cosine_ops)`                             | `embedding::halfvec(N) <=> $vec::halfvec(N)`                | <1pp lower (16-bit floats) |
 | > 4000          | `HNSW((binary_quantize(embedding)::bit(N)) bit_hamming_ops)` + exact rerank    | `binary_quantize(embedding)::bit(N) <~> ...` then `embedding <=> ...` on top-200 | depends on rerank N; ~0–3pp |
 
