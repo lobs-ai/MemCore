@@ -8,18 +8,44 @@ If the code disagrees with this spec, the spec wins. Update the code, or update 
 
 | Layer                | Choice                                  | Notes                                                  |
 | -------------------- | --------------------------------------- | ------------------------------------------------------ |
-| Language             | Python 3.11+                            | Or TypeScript; pick one and stick with it. This spec uses Python. |
-| Web framework        | FastAPI                                 | Async-native, Pydantic-integrated                      |
+| Language             | TypeScript (Node 20+)                   | ESM, strict mode, `tsc --noEmit` in CI                 |
+| Package manager      | pnpm                                    |                                                        |
+| Web framework        | Fastify v5                              | Async-native; Zod schemas via `fastify-type-provider-zod` |
+| Validation           | Zod                                     | Request bodies, env config, eval cases                 |
 | Database             | Postgres 16+ with `pgvector` extension  | Single store for chunks, memories, embeddings, edges   |
+| DB driver            | `postgres` (postgres.js)                | Tagged-template SQL, no ORM                            |
 | Search (keyword)     | Postgres `tsvector` + `pg_trgm`         | Sufficient until ~10M memories                         |
-| Queue                | Redis + RQ (or Celery)                  | Background ingestion jobs                              |
+| Queue                | Redis + BullMQ                          | Background ingestion jobs (Phase 2+)                   |
 | Embedding model      | `text-embedding-3-large` (3072 dim)     | Configurable via `EMBEDDING_MODEL` env var             |
+| Tokenizer (chunker)  | `gpt-tokenizer` (cl100k_base)           | Pure JS                                                |
 | Extraction LLM       | `claude-haiku-4-5` or `gpt-4o-mini`     | Cheap, fast; configurable                              |
 | Conflict detection LLM | `claude-sonnet-4-6` or `gpt-4o`       | Higher reasoning quality needed                        |
 | Reranker             | Cohere Rerank v3 (API)                  | `bge-reranker-v2-m3` as fallback for self-hosted       |
-| Type checking        | `mypy --strict`                         | CI enforced                                            |
-| Linting              | `ruff` + `ruff format`                  | CI enforced                                            |
-| Testing              | `pytest` with `pytest-asyncio`          | Co-located test files                                  |
+| Logger               | `pino`                                  | Structured JSON; pretty in dev                         |
+| Lint / format        | `biome`                                 | CI enforced                                            |
+| Testing              | `vitest`                                | Co-located test files (`*.test.ts`)                    |
+| Bundler              | `tsup`                                  | Builds the SDK + server entry points                   |
+| Dev runner           | `tsx`                                   | TypeScript without a build step in dev                 |
+
+### Library and server, one codebase
+
+MemCore ships as a single npm package with two surfaces:
+
+- The **`MemCore` SDK class** (default export). Consumers `new MemCore({...})` and call `add()` / `search()` / `close()` directly. Useful when you want memory in-process with no HTTP hop.
+- The **Fastify server** (`./server` subpath, plus the `pnpm dev` / `node dist/api/main.js` entry point). It builds a `MemCore` instance internally and exposes `/v1/...` HTTP endpoints over it.
+
+The server has no logic of its own beyond wire format. Anything callable via HTTP is callable via the class with the same arguments.
+
+### LLM and Embedder are injectable
+
+We ship no provider SDKs. The package exposes two interfaces:
+
+```ts
+interface LLMClient { createMessage(params: CreateMessageParams): Promise<LLMResponse>; }
+interface Embedder  { embed(args: { texts: string[] }): Promise<EmbeddingResponse>; }
+```
+
+The default `Embedder` implementation (`OpenAIEmbedder`, also exported as `OpenAICompatibleEmbedder`) calls any OpenAI-compatible `/v1/embeddings` endpoint via native `fetch`. Set `EMBEDDING_BASE_URL` (e.g. `http://localhost:1234/v1` for LMStudio, `http://localhost:11434/v1` for Ollama) and `EMBEDDING_API_KEY` to point at a local model with no code change. A `StubEmbedder` exists for tests and for boots without an API key. Consumers can pass any object satisfying the interface to the `MemCore` constructor; the type shapes mirror `@agentic/llm` so a thin adapter is all that's needed (Cohere, Voyage, etc.).
 
 ## Project structure
 
@@ -31,69 +57,75 @@ If the code disagrees with this spec, the spec wins. Update the code, or update 
 ├── ROADMAP.md
 ├── README.md
 ├── CONTRIBUTING.md
-├── pyproject.toml
+├── package.json                # pnpm; main = dist/index.js, ./server subpath
+├── tsconfig.json
+├── tsup.config.ts              # builds dist/index.js + dist/api/server.js + dist/api/main.js
+├── biome.json                  # lint + format
+├── vitest.config.ts
 ├── docker-compose.yml          # Postgres + Redis for local dev
 ├── .env.example
-├── alembic.ini                 # DB migrations config
-├── migrations/                 # Alembic migration scripts
-│   └── versions/
+├── db/
+│   ├── schema.sql              # single source of truth — destructive `pnpm db:reset`
+│   └── reset.ts
 ├── src/
-│   ├── api/                    # FastAPI routers
-│   │   ├── add.py              # POST /v1/add
-│   │   ├── search.py           # POST /v1/search
-│   │   ├── memories.py         # CRUD on memories
-│   │   └── health.py
-│   ├── models/                 # Pydantic + SQLAlchemy models
-│   │   ├── chunk.py
-│   │   ├── memory.py
-│   │   ├── edge.py
-│   │   ├── conversation.py
-│   │   └── container.py
-│   ├── ingestion/              # Async ingestion pipeline
-│   │   ├── pipeline.py         # Orchestrator
-│   │   ├── chunker.py          # Semantic chunking
-│   │   ├── contextualizer.py   # Contextual prefix generator
-│   │   ├── extractor.py        # Memory extraction LLM call
-│   │   ├── embedder.py         # Embedding generation
-│   │   ├── conflict_detector.py
-│   │   └── deduplicator.py
-│   ├── retrieval/              # Search path
-│   │   ├── vector_search.py
-│   │   ├── keyword_search.py
-│   │   ├── rrf.py              # Reciprocal rank fusion
-│   │   ├── reranker.py
-│   │   ├── temporal_filter.py
-│   │   └── graph_expander.py   # One-hop edge expansion
-│   ├── llm/                    # LLM client wrapper
-│   │   ├── client.py           # Provider-agnostic interface
-│   │   ├── anthropic_client.py
-│   │   ├── openai_client.py
-│   │   └── cost_tracker.py
-│   ├── prompts/                # Versioned prompt files
+│   ├── index.ts                # public package surface (MemCore class, types, errors)
+│   ├── memcore.ts              # the MemCore SDK class
+│   ├── config.ts               # Zod-validated env config
+│   ├── errors.ts
+│   ├── logging.ts              # pino setup
+│   ├── api/
+│   │   ├── main.ts             # server entry: builds MemCore + Fastify, listens
+│   │   ├── server.ts           # buildServer({ memcore }) — exported under "memcore/server"
+│   │   └── routes/
+│   │       ├── health.ts       # GET  /v1/health
+│   │       ├── add.ts          # POST /v1/add
+│   │       ├── search.ts       # POST /v1/search
+│   │       └── memories.ts     # CRUD on memories (Phase 2+)
+│   ├── ingestion/              # Phase-1 inline pipeline; queue lands in Phase 2
+│   │   ├── pipeline.ts
+│   │   ├── chunker.ts
+│   │   ├── contextualizer.ts   # Phase 3
+│   │   ├── extractor.ts        # Phase 2
+│   │   ├── conflict-detector.ts # Phase 4
+│   │   └── deduplicator.ts
+│   ├── retrieval/
+│   │   ├── vector-search.ts
+│   │   ├── keyword-search.ts   # Phase 3
+│   │   ├── rrf.ts              # Phase 3
+│   │   ├── reranker.ts         # Phase 3
+│   │   ├── temporal-filter.ts  # Phase 5
+│   │   └── graph-expander.ts   # Phase 4
+│   ├── llm/                    # injectable interfaces + default impls (no SDKs)
+│   │   ├── types.ts            # mirrors @agentic/llm shape
+│   │   ├── client.ts           # LLMClient interface + TrackedLLMClient
+│   │   ├── embedder.ts         # Embedder interface + TrackedEmbedder
+│   │   ├── openai-embedder.ts  # default; uses fetch
+│   │   ├── stub-embedder.ts    # deterministic, for tests/boot without keys
+│   │   ├── cost-tracker.ts
+│   │   └── index.ts
+│   ├── prompts/                # versioned text files (Phase 2+)
 │   │   ├── extraction_v1.txt
 │   │   ├── contextualizer_v1.txt
 │   │   ├── conflict_detector_v1.txt
 │   │   └── temporal_parser_v1.txt
-│   ├── connectors/             # External data sources (Phase 5+)
-│   │   └── base.py
-│   ├── db/                     # Database access
-│   │   ├── session.py
-│   │   └── queries.py
-│   ├── errors/
-│   ├── logging/
-│   └── config.py               # Pydantic Settings
+│   ├── connectors/             # external data sources (Phase 7+)
+│   │   └── base.ts
+│   └── db/
+│       ├── pool.ts             # global pool for scripts (the SDK class owns its own)
+│       └── vector.ts           # pgvector literal helper
 ├── evals/
-│   ├── runner.py
-│   ├── cases/
-│   │   ├── single_session_recall.jsonl
-│   │   ├── knowledge_update.jsonl
-│   │   ├── temporal_reasoning.jsonl
-│   │   ├── multi_session.jsonl
-│   │   └── abstain.jsonl
-│   └── metrics.py
+│   ├── runner.ts
+│   ├── metrics.ts
+│   ├── types.ts
+│   └── cases/
+│       ├── single_session_recall.jsonl
+│       ├── knowledge_update.jsonl    # Phase 4
+│       ├── temporal_reasoning.jsonl  # Phase 5
+│       ├── multi_session.jsonl       # Phase 4
+│       └── abstain.jsonl             # Phase 6
 └── scripts/
-    ├── reingest.py             # Re-run extraction with new prompt version
-    └── seed.py
+    ├── smoke.ts                # local end-to-end sanity check
+    └── reingest.ts             # re-run extraction with new prompt version (Phase 2+)
 ```
 
 ## Data model
@@ -159,8 +191,8 @@ Semantic chunks of source material.
 | created_at      | TIMESTAMPTZ |                                                |
 
 INDEX on (container_id, content_hash) for dedup.
-INDEX on embedding (HNSW or IVFFlat).
-INDEX on tsvector(content) for keyword search.
+INDEX on tsvector(content) for keyword search (used from Phase 3 onward).
+NO vector index in Phase 1: pgvector's ivfflat/HNSW cap at 2000 dimensions and our default model is 3072. The Phase 1 corpus is small enough that sequential cosine scan meets the latency budget. A halfvec-cast HNSW index lands when hybrid search arrives in Phase 3.
 
 #### `memories`
 Atomic facts.
@@ -419,19 +451,36 @@ Latency budget:
 - Steps 8–9: ~20ms
 - Total target: < 300ms p95
 
+## Vector index strategy
+
+`chunks.embedding` is stored as pgvector `VECTOR` with no fixed dim, so any embedding model fits without a schema change. ANN indexes have per-op-class dimensionality caps, so the index strategy depends on `EMBEDDING_DIM`. The `pnpm db:vector-index` script picks the right one and drops the prior index.
+
+| `EMBEDDING_DIM` | Index                                                                          | Query operator                                              | Recall vs. exact |
+| --------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------- | ---------------- |
+| ≤ 2000          | `HNSW(embedding vector_cosine_ops)`                                            | `embedding <=> $vec::vector`                                | exact            |
+| 2001..4000      | `HNSW((embedding::halfvec(N)) halfvec_cosine_ops)`                             | `embedding::halfvec(N) <=> $vec::halfvec(N)`                | <1pp lower (16-bit floats) |
+| > 4000          | `HNSW((binary_quantize(embedding)::bit(N)) bit_hamming_ops)` + exact rerank    | `binary_quantize(embedding)::bit(N) <~> ...` then `embedding <=> ...` on top-200 | depends on rerank N; ~0–3pp |
+
+In practice the bottom row applies only to research-grade embeddings. The current main-line models (`text-embedding-3-large` 3072, `text-embedding-3-small` 1536, Cohere `embed-english-v3.0` 1024, `nomic-embed-text-v1.5` 768) all fit comfortably in the first or second tier.
+
+Phase 1 ships with no ANN index — sequential cosine scan meets the latency budget for the small-corpus baseline. Phase 3 runs `pnpm db:vector-index` as part of the hybrid-search rollout.
+
 ## Configuration
 
-All config via environment variables, validated with Pydantic Settings.
+All config via environment variables, validated with Zod (`src/config.ts`).
 
 | Variable                      | Default                       | Notes                                  |
 | ----------------------------- | ----------------------------- | -------------------------------------- |
 | `DATABASE_URL`                | (required)                    | Postgres connection string             |
-| `REDIS_URL`                   | (required)                    | For job queue                          |
+| `REDIS_URL`                   | (required)                    | For job queue (Phase 2+)               |
+| `PORT`                        | `8000`                        | HTTP server port                       |
 | `ANTHROPIC_API_KEY`           | (optional)                    | Required if using Anthropic models     |
 | `OPENAI_API_KEY`              | (optional)                    | Required if using OpenAI models        |
 | `COHERE_API_KEY`              | (optional)                    | For reranker                           |
+| `EMBEDDING_BASE_URL`          | (optional)                    | Override the OpenAI-compat endpoint (LMStudio: `http://localhost:1234/v1`, Ollama: `http://localhost:11434/v1`). |
+| `EMBEDDING_API_KEY`           | (optional)                    | Overrides `OPENAI_API_KEY` for the embedder. LMStudio accepts any string. |
 | `EMBEDDING_MODEL`             | `text-embedding-3-large`      |                                        |
-| `EMBEDDING_DIM`               | `3072`                        | Must match model                       |
+| `EMBEDDING_DIM`               | `3072`                        | Must match model. See § Vector index strategy for ANN limits. |
 | `EXTRACTION_MODEL`            | `claude-haiku-4-5`            |                                        |
 | `CONFLICT_MODEL`              | `claude-sonnet-4-6`           |                                        |
 | `CONTEXTUALIZER_MODEL`        | `claude-haiku-4-5`            |                                        |
@@ -442,19 +491,21 @@ All config via environment variables, validated with Pydantic Settings.
 | `CHUNK_MAX_TOKENS`            | `800`                         |                                        |
 | `CHUNK_TOPIC_SHIFT_THRESHOLD` | `0.35`                        | Cosine drop                            |
 | `RRF_K`                       | `60`                          |                                        |
-| `LOG_LEVEL`                   | `INFO`                        |                                        |
+| `LOG_LEVEL`                   | `info`                        | pino level                             |
+| `ENVIRONMENT`                 | `development`                 | `development` / `test` / `production`  |
+| `API_KEY_DEV`                 | `dev-key`                     | Bearer token accepted in dev mode      |
 
 ## Prompts
 
 All prompts are stored as text files in `src/prompts/`, versioned by filename suffix (`_v1`, `_v2`, etc.). The active version is selected by config:
 
-```python
-EXTRACTION_PROMPT_VERSION = "v1"
+```ts
+export const EXTRACTION_PROMPT_VERSION = "v1";
 ```
 
 Memories store the version they were extracted with (`prompt_version` column) so we can identify which memories need re-extraction when prompts change.
 
-Prompt files use `{variable}` placeholders, rendered with Python's `str.format()`.
+Prompt files use `{variable}` placeholders, rendered with a small `format` helper (no `eval`, no template literals — keep prompts inert text).
 
 ## Errors
 
@@ -507,12 +558,14 @@ Located in `evals/`. Cases are JSONL files, one record per line:
 
 Categories mirror LongMemEval:
 - `single_session_recall`: facts within one session
-- `knowledge_update`: handling contradictions
-- `temporal_reasoning`: when did X happen
-- `multi_session`: facts across sessions
-- `abstain`: refuse to answer when info is missing
+- `knowledge_update`: handling contradictions (Phase 4)
+- `temporal_reasoning`: when did X happen (Phase 5)
+- `multi_session`: facts across sessions (Phase 4)
+- `abstain`: refuse to answer when info is missing (Phase 6)
 
-Run with `python -m evals.runner --category all --output report.json`. Report includes per-category accuracy, latency, and cost.
+Run with `pnpm eval -- --output report.json`. Report includes per-category accuracy and latency. Cost reporting lands in Phase 2 once we have memory extraction calling the LLM during ingestion.
+
+The runner ingests every case's setup into a single shared container so cases compete at retrieval time. Without that, top-k = "the only chunk you ingested" and accuracy is trivially 100%.
 
 ## Versioning
 

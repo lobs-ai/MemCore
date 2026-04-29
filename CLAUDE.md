@@ -58,8 +58,8 @@ You don't have to re-read these every turn within a single session, but do re-re
 - Writing a clear, scoped change
 
 **Ask before:**
-- Schema changes
-- New dependencies
+- Schema changes (editing `db/schema.sql` — `pnpm db:reset` is destructive)
+- New top-level dependencies in `package.json`
 - Cross-phase work (per `ROADMAP.md`)
 - Spec/code disagreements
 - Deletions or rewrites of >100 lines
@@ -94,7 +94,7 @@ git status
 git log --oneline -20
 
 # What's the test situation
-find . -name "*_test.py" -o -name "*.test.ts" | head -20
+find . -name "*.test.ts" -not -path "*/node_modules/*" | head -20
 ```
 
 Then read the doc(s) relevant to the task. Then plan. Then code.
@@ -117,3 +117,16 @@ This codebase has a few traps that LLMs (including you) tend to fall into. Watch
 6. **The agent calling save_memory autonomously.** No. The agent only calls it for explicit user requests. Extraction is a pipeline component, not an agent decision.
 
 If you find yourself writing code that violates any of these, stop and re-read `DESIGN.md`.
+
+## Build / test commands at a glance
+
+| Command            | When                                                      |
+| ------------------ | --------------------------------------------------------- |
+| `pnpm typecheck`   | After any TS edit; CI gate.                                |
+| `pnpm lint`        | Same.                                                      |
+| `pnpm lint:fix`    | Auto-format with biome.                                    |
+| `pnpm test`        | Run vitest unit tests.                                     |
+| `pnpm db:reset`    | After editing `db/schema.sql`. Destructive — drops tables. |
+| `pnpm dev`         | Start the Fastify API in watch mode.                       |
+| `pnpm eval`        | Run the eval harness. Add `-- --output report.json` to dump JSON. |
+| `pnpm build`       | Bundle the SDK + server with tsup. Used by CI / publishing. |

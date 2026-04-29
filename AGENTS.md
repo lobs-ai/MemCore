@@ -6,6 +6,8 @@ This file gives AI coding agents (Claude Code, Cursor, etc.) the context they ne
 
 We are building **MemCore** — a memory engine for AI agents that ingests conversations and documents, extracts atomic facts, stores them in a graph with typed relationships, and serves them back via a search API. Think of it as a from-scratch implementation in the spirit of Supermemory or Mem0.
 
+It ships as both an installable TypeScript package (`MemCore` SDK class) and a Fastify HTTP server. Both surfaces share one codebase — the server is a thin wrapper around the SDK. When the user says "add an endpoint," figure out whether the operation belongs on the SDK class first; the route is just plumbing.
+
 The system is **not** a vector database. It is a memory engine that uses a vector database as one of several components. The distinction matters: we store both raw chunks (archive) and atomic memories (semantic index), connected by a typed graph that handles updates, contradictions, and inferences over time.
 
 Read `DESIGN.md` for the architectural reasoning. Read `SPEC.md` for the concrete schemas and APIs. Read `ROADMAP.md` for the phased build plan and what's currently in scope.
@@ -34,13 +36,13 @@ Read `DESIGN.md` for the architectural reasoning. Read `SPEC.md` for the concret
 
 1. **Read the relevant section of `SPEC.md`** for the component you're touching. The schemas and API contracts there are authoritative.
 2. **Check `ROADMAP.md`** to confirm the change is in the current phase. Do not implement Phase 4 features while Phase 2 is still incomplete.
-3. **Run the eval harness** (`pnpm eval` or `python -m evals.runner`) before and after your change. We track quality, not just correctness.
+3. **Run the eval harness** (`pnpm eval`) before and after your change. We track quality, not just correctness.
 
 ### When writing code
 
 - **Match the existing structure.** Module layout is in `SPEC.md` § Project Structure. Don't introduce new top-level directories without updating the spec.
-- **Type everything.** TypeScript: strict mode, no `any` without a comment explaining why. Python: full type hints, validated by `mypy --strict`.
-- **Database changes go through migrations.** Never hand-edit the schema. Create a migration file, test it forwards and backwards.
+- **Type everything.** TypeScript strict mode (`tsc --noEmit`) is CI-enforced. No `any` without a `// biome-ignore` comment explaining why.
+- **Schema lives in `db/schema.sql`.** Edit that file directly and re-run `pnpm db:reset` locally. We do not run migrations during pre-production phases — `db:reset` is destructive on purpose. Phase 8 will introduce a migration tool against a frozen baseline.
 - **LLM calls are versioned.** Prompts live in `src/prompts/` and are versioned (e.g., `extraction_v3.txt`). When you change a prompt, bump the version and update the schema's `prompt_version` field. Old memories keep their version tag so we can re-extract if needed.
 - **Idempotent ingestion.** Re-ingesting the same content must not produce duplicates. Use content hashes as deduplication keys.
 
@@ -63,7 +65,7 @@ Read `DESIGN.md` for the architectural reasoning. Read `SPEC.md` for the concret
 
 ## Code style quick reference
 
-- **Naming**: `snake_case` for Python files and DB columns, `camelCase` for TypeScript variables, `PascalCase` for types and classes. DB tables are plural (`memories`, `chunks`).
+- **Naming**: `kebab-case` for filenames (`vector-search.ts`), `camelCase` for TS identifiers, `PascalCase` for types and classes, `snake_case` for DB columns. Tables are plural (`memories`, `chunks`).
 - **Comments**: Explain *why*, not *what*. The code shows what. Reserve comments for non-obvious decisions.
 - **Errors**: Custom exception classes in `src/errors/`. No raw `raise Exception("...")`.
 - **Logging**: Structured logging only. Use the logger in `src/logging/`. Include `request_id`, `container_tag`, and component name on every log.
@@ -77,7 +79,7 @@ Read `DESIGN.md` for the architectural reasoning. Read `SPEC.md` for the concret
 
 ## Common tasks and how to approach them
 
-**"Add a new memory category."** Update the extraction prompt schema in `src/prompts/extraction_vN.txt`, bump the version, update the `Memory` type in `src/models/memory.py`, write a migration if storage changes, run the eval suite. Don't add a category just because it sounds useful — categories should reflect retrieval-time filters that actually exist.
+**"Add a new memory category."** Update the extraction prompt schema in `src/prompts/extraction_vN.txt`, bump the version, update the `Memory` type in `src/types/memory.ts`, edit `db/schema.sql` if storage changes, run `pnpm db:reset`, run the eval suite. Don't add a category just because it sounds useful — categories should reflect retrieval-time filters that actually exist.
 
 **"Improve retrieval quality."** Don't tweak the retrieval code first. Run the eval suite to find which categories are weak. Add failing test cases. Then experiment. The order matters because retrieval is a search problem and intuition is unreliable here.
 

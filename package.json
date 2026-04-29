@@ -1,0 +1,55 @@
+{
+  "name": "memcore",
+  "version": "0.1.0",
+  "description": "MemCore — a memory engine for AI agents: chunks, atomic memories, typed graph, hybrid retrieval.",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/api/server.d.ts",
+      "import": "./dist/api/server.js"
+    }
+  },
+  "files": ["dist", "db/schema.sql", "README.md"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/api/main.ts",
+    "start": "node dist/api/main.js",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:reset": "tsx db/reset.ts",
+    "db:vector-index": "tsx scripts/create-vector-index.ts",
+    "eval": "tsx evals/runner.ts"
+  },
+  "dependencies": {
+    "@fastify/sensible": "^6.0.3",
+    "fastify": "^5.2.1",
+    "fastify-type-provider-zod": "^4.0.2",
+    "gpt-tokenizer": "^2.8.1",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.10.5",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

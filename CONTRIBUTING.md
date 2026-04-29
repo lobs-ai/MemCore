@@ -41,7 +41,7 @@ PR template:
 
 ## Checklist
 - [ ] Spec updated if behavior changed
-- [ ] Migrations added if schema changed
+- [ ] `db/schema.sql` updated if schema changed (and `pnpm db:reset` succeeds locally)
 - [ ] Eval suite run if quality-affecting
 - [ ] Tests added/updated
 - [ ] Docs updated
@@ -51,23 +51,24 @@ PRs must pass CI: lint, type check, test, eval suite (for quality-affecting chan
 
 ## Code style
 
-### Python
+### TypeScript
 
-- Python 3.11+. Use modern syntax (`list[int]`, not `List[int]`).
-- Type hints on every function signature, validated by `mypy --strict`.
-- `ruff` for lint and format. CI enforced.
-- Docstrings on public functions, classes, and modules. Use Google style.
-- No `print` statements. Use the structured logger.
+- TypeScript 5.7+, Node 20+, ESM modules.
+- `tsc --noEmit` (strict, `noUncheckedIndexedAccess`) is CI-enforced.
+- `biome` for lint and format. CI enforced. Run `pnpm lint:fix` before committing.
+- JSDoc on exported functions, classes, and modules. Explain *why*, not *what*.
+- No `console.log`. Use the structured logger (`getLogger("component")`).
 - Prefer composition over inheritance. Inheritance only for true is-a relationships.
-- Async-first. If a function does I/O, it's `async def`.
+- Async-first. If a function does I/O, it returns a `Promise`.
+- No new top-level `dependencies` without justification in the PR. The fewer the better.
 
 ### Database
 
-- All schema changes via Alembic migrations. Never edit the schema directly.
-- Migrations must be reversible. Write the `downgrade` step.
-- Test migrations against a copy of production-like data before merging.
-- Index decisions documented in the migration's docstring.
+- Schema lives in **one place**: `db/schema.sql`. Edit that file directly.
+- Apply locally with `pnpm db:reset` — destructive: drops every table.
+- We do **not** run migrations during pre-production phases. Phase 8 introduces a migration tool against a frozen baseline. Until then, schema churn is expected and a migration history would be cargo-cult noise.
 - Foreign keys must have `ON DELETE` behavior specified explicitly.
+- Index decisions documented inline in `db/schema.sql`.
 
 ### Prompts
 
@@ -79,16 +80,16 @@ PRs must pass CI: lint, type check, test, eval suite (for quality-affecting chan
 
 ### LLM calls
 
-- All LLM calls go through `src/llm/client.py`. No direct SDK usage outside this module.
-- The client wraps: retries with exponential backoff, structured logging, cost tracking, model selection.
+- All LLM and embedding calls go through the `LLMClient` / `Embedder` interfaces in `src/llm/`. No provider SDKs in this package — adapters live in user code or sibling packages.
+- Use the `TrackedLLMClient` / `TrackedEmbedder` wrappers so cost is recorded against the active `CostTracker`.
 - Streaming is opt-in. Default is unary.
 - Prompt caching is opt-in but encouraged for the contextualizer and any prompt that gets reused with stable prefixes.
 
 ### Tests
 
-- Co-located with source: `chunker.py` and `chunker_test.py` in the same directory.
-- Pytest, async support via `pytest-asyncio`.
-- Unit tests mock the LLM via `src/llm/client.py`'s test mode. Integration tests hit a real (cheap, deterministic) model.
+- Co-located with source: `chunker.ts` and `chunker.test.ts` in the same directory.
+- Vitest (`pnpm test`).
+- Unit tests inject a fake `Embedder` / `LLMClient` (the interfaces are designed for this). Integration tests hit a real cheap model.
 - Every bug fix starts with a failing test that reproduces the bug.
 - Quality-affecting changes must add eval cases, not just unit tests. Unit tests don't catch quality regressions.
 - Coverage isn't measured strictly. Test the behavior, not the lines.
@@ -124,7 +125,7 @@ In order:
 - Synchronous LLM calls in API request handlers
 - Tests that mock the LLM with hardcoded responses without an integration test alongside
 - Skipping the eval suite on quality-affecting changes
-- Schema changes without a migration
+- Schema changes without updating `db/schema.sql`
 - Magic numbers without a named constant
 - TODO comments without an issue link
 

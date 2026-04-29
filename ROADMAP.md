@@ -4,7 +4,7 @@ This document defines the phased build plan for **MemCore**. Phases are sequenti
 
 For *what* to build, see `SPEC.md`. For *why*, see `DESIGN.md`. For *how* to work in this repo, see `AGENTS.md`.
 
-**Current phase: Phase 1** (Phase 0 complete)
+**Current phase: Phase 2** (Phases 0–1 complete)
 
 ---
 
@@ -13,20 +13,19 @@ For *what* to build, see `SPEC.md`. For *why*, see `DESIGN.md`. For *how* to wor
 Set up the project skeleton. No real functionality yet.
 
 **Tasks:**
-- Initialize repo, `pyproject.toml`, dev dependencies
+- Initialize repo, `package.json`, `tsconfig.json`, dev dependencies (pnpm)
 - `docker-compose.yml` with Postgres + pgvector + Redis
-- FastAPI scaffold with `/v1/health` endpoint
-- Database connection, Alembic config, initial empty migration
-- LLM client wrapper (`src/llm/client.py`) with Anthropic and OpenAI providers, retry logic, cost tracking
-- Embedding client wrapper
-- Structured logger
-- Basic CI: lint (ruff), type check (mypy), test (pytest)
+- Fastify scaffold with `/v1/health` endpoint
+- Database connection (`postgres` driver) — single `db/schema.sql`, no migrations
+- `LLMClient` and `Embedder` interfaces in `src/llm/`; default OpenAI embedder via fetch
+- `pino` structured logger
+- Basic CI: `biome` (lint), `tsc --noEmit` (types), `vitest` (tests)
 - `.env.example` with all required vars from `SPEC.md`
 
 **Exit criteria:**
-- `docker-compose up` brings everything up
+- `docker compose up` brings everything up
 - `curl localhost:8000/v1/health` returns 200
-- `pytest` runs (with zero tests is fine)
+- `pnpm test` runs (with zero tests is fine)
 - CI is green
 
 ---
@@ -36,16 +35,16 @@ Set up the project skeleton. No real functionality yet.
 The goal is end-to-end working code with the simplest possible implementation. No memories yet — just chunks and vector search. This is the control we'll measure improvements against.
 
 **Tasks:**
-- Implement schemas for `containers`, `conversations`, `messages`, `chunks` (no `memories`, `edges`, or `memory_chunks` yet)
-- `POST /v1/add`: accepts content or messages, splits into fixed-size chunks (token-based, no semantic logic), embeds, stores
-- `POST /v1/search`: embeds query, returns top-k chunks by cosine similarity
-- Basic eval harness in `evals/runner.py` with 10–20 hand-written test cases
+- Add `containers`, `conversations`, `messages`, `chunks` to `db/schema.sql` (no `memories`, `edges`, or `memory_chunks` yet)
+- `MemCore.add()` and `POST /v1/add`: accepts content or messages, splits into fixed-size chunks (token-based, no semantic logic), embeds, stores
+- `MemCore.search()` and `POST /v1/search`: embeds query, returns top-k chunks by cosine similarity
+- Basic eval harness in `evals/runner.ts` with 10–20 hand-written test cases
 - A single eval category to start: `single_session_recall`
 
-**Out of scope:** memory extraction, contextual prefixes, hybrid search, reranking, conflict detection, edges, temporal reasoning.
+**Out of scope:** memory extraction, contextual prefixes, hybrid search, reranking, conflict detection, edges, temporal reasoning, async ingestion queue.
 
 **Exit criteria:**
-- End-to-end: add content via API, search and retrieve via API
+- End-to-end: add content via SDK or API, search and retrieve via SDK or API
 - Eval suite runs, produces a baseline number
 - Document the baseline number in this file (see "Baselines" section below)
 
@@ -56,12 +55,13 @@ The goal is end-to-end working code with the simplest possible implementation. N
 Introduce the chunks-vs-memories split. This is where the system stops being RAG and starts being memory.
 
 **Tasks:**
-- Add `memories` and `memory_chunks` tables (migration)
-- Implement `src/ingestion/extractor.py`: LLM call that extracts atomic memories from a chunk
+- Add `memories` and `memory_chunks` tables (schema)
+- Implement `src/ingestion/extractor.ts`: LLM call that extracts atomic memories from a chunk
 - Write `src/prompts/extraction_v1.txt`
 - Update ingestion pipeline: chunk → embed chunk → extract memories → embed memories → store both
-- Update `POST /v1/search`: search runs against memories, joins source chunks in response
-- Add `include_chunks` query parameter
+- Update `MemCore.search()` / `POST /v1/search`: search runs against memories, joins source chunks in response
+- Add `include_chunks` parameter
+- Move ingestion behind a Redis/BullMQ queue (sessions become the unit; see DESIGN § 4)
 - Eval suite: same cases run against the new path. Measure delta.
 
 **Out of scope:** contextual prefixes, conflict detection, edges, hybrid search.
@@ -78,15 +78,16 @@ Introduce the chunks-vs-memories split. This is where the system stops being RAG
 Improve retrieval quality with two well-known techniques.
 
 **Tasks:**
-- Implement `src/ingestion/contextualizer.py`: generates a contextual prefix per chunk using the full session as context
+- Implement `src/ingestion/contextualizer.ts`: generates a contextual prefix per chunk using the full session as context
 - Use prompt caching (Anthropic native, or OpenAI prompt caching) to control cost
-- Add `contextual_prefix` column to `chunks`
+- `contextual_prefix` column already exists in `chunks` — populate it
 - Re-embed chunks using `contextual_prefix + content`
-- Implement `src/retrieval/keyword_search.py` using Postgres `tsvector`
-- Implement `src/retrieval/rrf.py` for reciprocal rank fusion
-- Add reranker integration (`src/retrieval/reranker.py`)
+- Run `pnpm db:vector-index` (`scripts/create-vector-index.ts`) to build the right HNSW index for the configured `EMBEDDING_DIM` (vector / halfvec / bit + rerank — see SPEC § Vector index strategy)
+- Implement `src/retrieval/keyword-search.ts` using Postgres `tsvector`
+- Implement `src/retrieval/rrf.ts` for reciprocal rank fusion
+- Add reranker integration (`src/retrieval/reranker.ts`)
 - Update search pipeline to: vector → keyword → RRF → rerank
-- Add migration script (`scripts/reingest.py`) to regenerate prefixes for existing chunks
+- Add `scripts/reingest.ts` to regenerate prefixes for existing chunks
 
 **Exit criteria:**
 - Eval suite shows further improvement (target: +5 points overall)
@@ -100,11 +101,11 @@ Improve retrieval quality with two well-known techniques.
 Add the typed edge graph. This is the largest phase — handle it carefully.
 
 **Tasks:**
-- Add `edges` table (migration)
-- Implement `src/ingestion/conflict_detector.py`: classifies new memories as `new` / `update` / `extend` / `derive` / `duplicate`
+- Add `edges` table (schema)
+- Implement `src/ingestion/conflict-detector.ts`: classifies new memories as `new` / `update` / `extend` / `derive` / `duplicate`
 - Write `src/prompts/conflict_detector_v1.txt`
 - Update ingestion pipeline: after memory extraction, run conflict detection, write edges, update superseded memories' status
-- Implement `src/retrieval/graph_expander.py`: one-hop edge traversal at query time
+- Implement `src/retrieval/graph-expander.ts`: one-hop edge traversal at query time
 - Add `expand_graph` query parameter to search
 - Add knowledge_update and multi_session eval categories with deliberately contradictory test data
 - Document the dedup heuristics and tune the similarity threshold for conflict detection
@@ -112,7 +113,7 @@ Add the typed edge graph. This is the largest phase — handle it carefully.
 **Exit criteria:**
 - Knowledge-update eval category shows >75% accuracy
 - Multi-session eval category shows >65% accuracy
-- Manual test: ingest "I love Python", then "I prefer Rust now" — search for "language preference" returns Rust as active and Python as superseded
+- Manual test: ingest "I love TypeScript", then "I prefer Rust now" — search for "language preference" returns Rust as active and TypeScript as superseded
 
 ---
 
@@ -121,9 +122,9 @@ Add the typed edge graph. This is the largest phase — handle it carefully.
 Two-axis time. Distinguishes "when said" from "when happened."
 
 **Tasks:**
-- Add `event_date` and `event_date_precision` columns to `memories` (migration)
+- Add `event_date` and `event_date_precision` columns to `memories` (schema)
 - Update extraction prompt to extract `event_date` separately
-- Implement `src/retrieval/temporal_filter.py`
+- Implement `src/retrieval/temporal-filter.ts`
 - Implement temporal query parsing (`src/prompts/temporal_parser_v1.txt` + `src/retrieval/`)
 - Add `date_range` filter to search API
 - Add temporal_reasoning eval category
@@ -155,7 +156,7 @@ Higher-level abstractions over the memory graph.
 External data sources beyond the API.
 
 **Tasks:**
-- Define connector interface in `src/connectors/base.py`
+- Define connector interface in `src/connectors/base.ts`
 - Implement first three connectors: Google Drive, Slack, Notion
 - Each connector: OAuth flow, fetch, incremental sync, conversion to chunks
 - Connector job scheduler
@@ -172,6 +173,7 @@ External data sources beyond the API.
 Get it to "deployable."
 
 **Tasks:**
+- Introduce a real migration tool (likely `node-pg-migrate` or hand-rolled SQL versions). Freeze `db/schema.sql` as the v1 baseline; from this point forward, `pnpm db:reset` is dev-only and prod gets migrations.
 - Multi-tenant security review: enforce `container_id` at every query path
 - Postgres row-level security
 - Rate limiting per API key
@@ -194,7 +196,8 @@ This section is updated as phases complete. Track quality over time.
 
 | Phase | Date | Eval overall | Single-session-recall | Knowledge-update | Temporal | Multi-session | Notes |
 | ----- | ---- | ------------ | --------------------- | ---------------- | -------- | ------------- | ----- |
-| 1     | TBD  | —            | —                     | n/a              | n/a      | n/a           | Naive RAG |
+| 1 (stub embedder) | 2026-04-29 | 13.3% | 13.3% (2/15) | n/a | n/a | n/a | Naive RAG; `StubEmbedder` for plumbing only — number is noise (random baseline). |
+| 1 (OpenAI emb.)   | TBD        | —     | —             | n/a | n/a | n/a | Re-run with `OPENAI_API_KEY` set to lock in the real Phase 1 baseline. |
 | 2     | TBD  | —            | —                     | n/a              | n/a      | n/a           | + memories layer |
 | 3     | TBD  | —            | —                     | n/a              | n/a      | n/a           | + contextual + hybrid + rerank |
 | 4     | TBD  | —            | —                     | —                | n/a      | —             | + graph + conflict detection |
@@ -206,4 +209,8 @@ This section is updated as phases complete. Track quality over time.
 
 When a non-obvious decision is made during implementation, record it here with the date and reasoning.
 
-- (none yet)
+- **2026-04-29**: Switched the implementation language from Python to TypeScript and reshaped the project as both an installable package (`MemCore` SDK class) and a Fastify server. Reason: the user's existing `@agentic/llm` client is TS, and shipping a class lets them embed memory in-process without an HTTP hop.
+- **2026-04-29**: Dropped Alembic / migrations during pre-production phases. `db/schema.sql` is the single source of truth; `pnpm db:reset` is destructive. Reason: schema churn is expected through Phase 7 and a migration history would be cargo-cult noise. A real migration tool lands in Phase 8.
+- **2026-04-29**: No vector index in Phase 1. pgvector's ivfflat/HNSW cap at 2000 dimensions and our default `text-embedding-3-large` is 3072. Sequential cosine scan meets the latency budget at Phase 1 corpus sizes. A halfvec-cast HNSW index lands in Phase 3 alongside hybrid search.
+- **2026-04-29**: `chunks.embedding` is unbounded `VECTOR` (no fixed dim). Index choice is deferred to a separate `pnpm db:vector-index` script that picks vector / halfvec / binary-quantize+rerank by `EMBEDDING_DIM`. Reason: we want to support models past 2000 (and even past 4000) dims without a schema change, and pgvector's per-op-class limits leave no single index that covers everything.
+- **2026-04-29**: Default embedder is OpenAI-shaped but provider-agnostic — pointed at any `/v1/embeddings` server via `EMBEDDING_BASE_URL`. LMStudio, Ollama, vLLM, llama.cpp all work without code. Non-OpenAI-shaped providers (Cohere, Voyage) implement `Embedder` directly and get passed via `embedder:`.
