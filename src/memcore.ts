@@ -322,6 +322,12 @@ export interface SearchResponse {
     abstainReason: "no_candidates" | "low_similarity" | null;
     /** True when the profile-relevance heuristic fired on this query. */
     profileRelevant: boolean;
+    /**
+     * Top vector-search cosine similarity for the query, before rerank. Useful
+     * for telemetry and for tuning `abstainSimilarityFloor`. 0 when the
+     * vector pool was empty.
+     */
+    topVectorSimilarity: number;
   };
 }
 
@@ -569,6 +575,7 @@ export class MemCore {
           shouldAbstain: true,
           abstainReason: "no_candidates",
           profileRelevant: profileMatch.isRelevant,
+          topVectorSimilarity: 0,
         },
       };
     }
@@ -657,6 +664,7 @@ export class MemCore {
           shouldAbstain: true,
           abstainReason: "no_candidates",
           profileRelevant: profileMatch.isRelevant,
+          topVectorSimilarity,
         },
       };
     }
@@ -685,6 +693,7 @@ export class MemCore {
           shouldAbstain: true,
           abstainReason: "no_candidates",
           profileRelevant: profileMatch.isRelevant,
+          topVectorSimilarity,
         },
       };
     }
@@ -711,6 +720,7 @@ export class MemCore {
           shouldAbstain: true,
           abstainReason: "no_candidates",
           profileRelevant: profileMatch.isRelevant,
+          topVectorSimilarity,
         },
       };
     }
@@ -772,6 +782,7 @@ export class MemCore {
         shouldAbstain: lowSimilarity,
         abstainReason: lowSimilarity ? "low_similarity" : null,
         profileRelevant: profileMatch.isRelevant,
+        topVectorSimilarity,
       },
     };
   }

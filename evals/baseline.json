@@ -1,0 +1,45 @@
+{
+  "capturedAt": "2026-04-30T16:40:50.487Z",
+  "capturedWith": {
+    "grader": "llm",
+    "embeddingModel": "nomic-embed-text",
+    "extractionModel": "qwen2.5:7b"
+  },
+  "overall": {
+    "total": 63,
+    "passed": 38,
+    "accuracy": 0.6031746031746031
+  },
+  "byCategory": [
+    {
+      "category": "abstain",
+      "total": 12,
+      "passed": 12,
+      "accuracy": 1
+    },
+    {
+      "category": "knowledge_update",
+      "total": 12,
+      "passed": 7,
+      "accuracy": 0.5833333333333334
+    },
+    {
+      "category": "multi_session",
+      "total": 12,
+      "passed": 5,
+      "accuracy": 0.4166666666666667
+    },
+    {
+      "category": "single_session_recall",
+      "total": 15,
+      "passed": 6,
+      "accuracy": 0.4
+    },
+    {
+      "category": "temporal_reasoning",
+      "total": 12,
+      "passed": 8,
+      "accuracy": 0.6666666666666666
+    }
+  ]
+}

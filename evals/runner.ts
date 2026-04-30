@@ -133,6 +133,12 @@ async function runCase(deps: RunCaseDeps, c: EvalCase): Promise<EvalResult> {
     query: c.question,
     limit: 5,
     includeChunks: true,
+    // Disable the temporal parser for the eval: setup messages aren't
+    // time-stamped, so document_date defaults to ingestion time. A parser-
+    // emitted window like "last summer" would filter every freshly-ingested
+    // row out. Cases that *should* exercise temporal narrowing belong in a
+    // dedicated suite with explicit `documentDate`s.
+    dateRange: null,
   });
   const latencyMs = Math.round(performance.now() - start);
   // Score the memory content first; fall back to source chunks so the metric
@@ -168,6 +174,7 @@ async function runCase(deps: RunCaseDeps, c: EvalCase): Promise<EvalResult> {
     retrievedTopK: result.results.map((r) => ({ content: r.memory.content, score: r.score })),
     latencyMs,
     shouldAbstain,
+    topVectorSimilarity: result.queryMetadata.topVectorSimilarity,
     notes,
   };
 }
@@ -230,14 +237,33 @@ async function main(): Promise<void> {
     embeddingDim: settings.embeddingDim,
     extractionModel: settings.extractionModel,
     contextualizerModel: settings.contextualizerModel,
+    conflictModel: settings.conflictModel,
+    temporalParserModel: settings.temporalParserModel,
+    profileGeneratorModel: settings.profileGeneratorModel,
+    abstainSimilarityFloor: settings.abstainSimilarityFloor,
     cohereApiKey: settings.cohereApiKey,
     chunkMaxTokens: settings.chunkMaxTokens,
     chunkMinTokens: settings.chunkMinTokens,
     ...(settings.llmBaseUrl ? { llmBaseUrl: settings.llmBaseUrl } : {}),
   });
 
-  // Shared container per run so cases compete against each other at retrieval.
-  const containerTag = `eval_run_${Date.now()}`;
+  // Per-case isolated containers. Every case represents a distinct user with
+  // a distinct memory state — they shouldn't share a container, because:
+  //   1. Every setup uses "I" / "the user". The conflict detector across
+  //      cases starts treating fact A from case X as "superseded" by fact B
+  //      from case Y (e.g. "drives a Subaru" gets flipped to past-tense by
+  //      another case's "drives a Rivian"). Cross-case leakage corrupts the
+  //      memory state under test.
+  //   2. Recall queries score against the *closest* memory in the entire
+  //      pool, not the case's own memory — so a query for case X's
+  //      neighbourhood happily returns case Y's neighbourhood.
+  //
+  // We previously shared so cases would compete at retrieval. The right way
+  // to add competition is a per-container noise corpus, not cross-case
+  // contamination. For now: isolation. Numbers will drop in raw count but
+  // are now actually measuring what each category is named for.
+  const runId = Date.now();
+  const tagFor = (c: EvalCase) => `eval_${c.category}_${c.case_id}_${runId}`;
 
   const results: EvalResult[] = [];
   try {
@@ -245,6 +271,7 @@ async function main(): Promise<void> {
     // each session as its own conversation so the conflict detector and
     // multi-session retrieval are exercised end-to-end.
     for (const c of cases) {
+      const containerTag = tagFor(c);
       if (c.setup_sessions && c.setup_sessions.length > 0) {
         for (let i = 0; i < c.setup_sessions.length; i += 1) {
           const session = c.setup_sessions[i];
@@ -264,9 +291,12 @@ async function main(): Promise<void> {
       }
     }
 
-    // Then query each.
+    // Then query each in its appropriate container.
     for (const c of cases) {
-      const result = await runCase({ memcore, containerTag, grader: args.grader, llmGrader }, c);
+      const result = await runCase(
+        { memcore, containerTag: tagFor(c), grader: args.grader, llmGrader },
+        c,
+      );
       results.push(result);
       logger.info(
         { caseId: c.case_id, passed: result.passed, latencyMs: result.latencyMs },

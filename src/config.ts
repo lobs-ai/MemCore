@@ -40,7 +40,14 @@ const SettingsSchema = z.object({
   extractionModel: z.string().default("claude-haiku-4-5"),
   conflictModel: z.string().default("claude-sonnet-4-6"),
   contextualizerModel: z.string().default("claude-haiku-4-5"),
+  temporalParserModel: z.string().default("claude-haiku-4-5"),
+  profileGeneratorModel: z.string().default("claude-haiku-4-5"),
   rerankerProvider: z.enum(["cohere", "local"]).default("cohere"),
+
+  // Retrieval gates
+  // Cosine floor below which `search()` returns shouldAbstain. Calibrated to
+  // text-embedding-3-large (0.3); raise to ~0.55 for nomic-embed-text.
+  abstainSimilarityFloor: z.coerce.number().default(0.3),
 
   // Ingestion
   sessionInactivityMinutes: z.coerce.number().int().positive().default(30),
@@ -105,7 +112,10 @@ export function getSettings(): Settings {
     extractionModel: e.EXTRACTION_MODEL,
     conflictModel: e.CONFLICT_MODEL,
     contextualizerModel: e.CONTEXTUALIZER_MODEL,
+    temporalParserModel: e.TEMPORAL_PARSER_MODEL,
+    profileGeneratorModel: e.PROFILE_GENERATOR_MODEL,
     rerankerProvider: e.RERANKER_PROVIDER,
+    abstainSimilarityFloor: e.ABSTAIN_SIMILARITY_FLOOR,
     sessionInactivityMinutes: e.SESSION_INACTIVITY_MINUTES,
     sessionLengthThreshold: e.SESSION_LENGTH_THRESHOLD,
     chunkMinTokens: e.CHUNK_MIN_TOKENS,

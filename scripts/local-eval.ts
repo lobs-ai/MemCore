@@ -33,6 +33,10 @@ const llmModel = e.LOCAL_LLM_MODEL ?? "qwen2.5:7b";
 const embeddingBaseUrl = e.LOCAL_EMBEDDING_BASE_URL ?? "http://localhost:11434/v1";
 const embeddingApiKey = e.LOCAL_EMBEDDING_API_KEY ?? "ollama";
 const embeddingModel = e.LOCAL_EMBEDDING_MODEL ?? "nomic-embed-text";
+// nomic-embed-text has a tighter cosine band than text-embedding-3-large, so
+// the default 0.3 floor never gates anything. 0.55 is the calibrated value
+// used by scripts/test-client.ts.
+const abstainFloor = e.LOCAL_ABSTAIN_SIMILARITY_FLOOR ?? "0.55";
 
 // The eval runner reads these vars via getSettings() and honors
 // LLM_BASE_URL + EMBEDDING_BASE_URL when building its OpenAI-compatible
@@ -46,6 +50,9 @@ const overlay: Record<string, string> = {
   EXTRACTION_MODEL: llmModel,
   CONFLICT_MODEL: llmModel,
   CONTEXTUALIZER_MODEL: llmModel,
+  TEMPORAL_PARSER_MODEL: llmModel,
+  PROFILE_GENERATOR_MODEL: llmModel,
+  ABSTAIN_SIMILARITY_FLOOR: abstainFloor,
   // Cohere reranker is paid and rarely available locally — drop the key so
   // the runner falls back to the passthrough reranker.
   COHERE_API_KEY: "",
@@ -56,6 +63,7 @@ const args = process.argv.slice(2);
 console.log("=== local-eval ===");
 console.log(`  llm:        ${llmBaseUrl}  (${llmModel})`);
 console.log(`  embedding:  ${embeddingBaseUrl}  (${embeddingModel})`);
+console.log(`  abstain:    floor=${abstainFloor}`);
 console.log(`  forwarding: ${args.join(" ") || "(no flags)"}`);
 console.log("");
 

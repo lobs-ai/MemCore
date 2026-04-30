@@ -45,5 +45,7 @@ export interface EvalResult {
   retrievedTopK: { content: string; score: number }[];
   latencyMs: number;
   shouldAbstain?: boolean;
+  /** Top vector cosine similarity for the query, before rerank. */
+  topVectorSimilarity?: number;
   notes?: string;
 }
