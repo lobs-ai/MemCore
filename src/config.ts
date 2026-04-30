@@ -28,6 +28,12 @@ const SettingsSchema = z.object({
   embeddingBaseUrl: z.string().optional(),
   embeddingApiKey: z.string().optional(),
 
+  // LLM endpoint. Same shape as the embedding overrides above — set this to
+  // run extraction / conflict / grader against a local OpenAI-compatible
+  // server (Ollama on :11434, LMStudio on :1234, vLLM, etc.). Defaults to
+  // the public OpenAI base URL.
+  llmBaseUrl: z.string().optional(),
+
   // Models
   embeddingModel: z.string().default("text-embedding-3-large"),
   embeddingDim: z.coerce.number().int().positive().default(3072),
@@ -93,6 +99,7 @@ export function getSettings(): Settings {
     cohereApiKey: e.COHERE_API_KEY || undefined,
     embeddingBaseUrl: e.EMBEDDING_BASE_URL || undefined,
     embeddingApiKey: e.EMBEDDING_API_KEY || undefined,
+    llmBaseUrl: e.LLM_BASE_URL || undefined,
     embeddingModel: e.EMBEDDING_MODEL,
     embeddingDim: e.EMBEDDING_DIM,
     extractionModel: e.EXTRACTION_MODEL,

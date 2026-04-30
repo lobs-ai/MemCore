@@ -1,10 +1,9 @@
 /**
  * Aggregate eval results into per-category accuracy / latency.
  *
- * Phase 1 measures recall-as-retrieval: does the answer string appear in any
- * of the top-k retrieved chunks? When Phase 2 introduces the memories layer,
- * we'll add an LLM-grader path that judges whether the retrieved memories
- * actually answer the question. Phase 1's `contains` is a loose proxy.
+ * Two scorers feed this aggregator: the cheap substring-match (`contains`)
+ * and the LLM grader in `grader.ts`. The aggregation shape is the same for
+ * both — only the per-case `passed` boolean differs.
  */
 
 import type { Category, EvalResult } from "./types.js";

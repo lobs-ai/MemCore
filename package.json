@@ -32,6 +32,8 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:local": "MEMCORE_LOCAL_TEST=1 vitest run src/memcore.local.test.ts",
+    "eval:local": "tsx scripts/local-eval.ts",
     "db:reset": "tsx db/reset.ts",
     "db:vector-index": "tsx scripts/create-vector-index.ts",
     "reingest": "tsx scripts/reingest.ts",

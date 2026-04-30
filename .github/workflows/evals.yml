@@ -1,0 +1,93 @@
+name: Evals
+
+# Eval runs cost real money (LLM + embedding tokens). They run nightly and
+# on-demand via workflow_dispatch — never on every PR. The job fails if any
+# category accuracy regresses more than the baseline tolerance.
+#
+# To capture a new baseline: trigger this workflow with `update-baseline=true`,
+# pull the resulting branch, and merge the baseline.json change.
+
+on:
+  schedule:
+    # 07:00 UTC daily.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      update-baseline:
+        description: "Capture a new baseline instead of comparing"
+        required: false
+        default: "false"
+      category:
+        description: "Run only this category (blank = all)"
+        required: false
+        default: ""
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: memcore
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d memcore"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Apply schema
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/memcore
+          REDIS_URL: redis://localhost:6379/0
+        run: pnpm db:reset
+
+      - name: Run evals
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/memcore
+          REDIS_URL: redis://localhost:6379/0
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+        run: |
+          set -e
+          ARGS="-- --output report.json --grader llm"
+          if [ -n "${{ github.event.inputs.category }}" ]; then
+            ARGS="$ARGS --category ${{ github.event.inputs.category }}"
+          fi
+          if [ "${{ github.event.inputs.update-baseline }}" = "true" ]; then
+            ARGS="$ARGS --update-baseline"
+          else
+            ARGS="$ARGS --baseline"
+          fi
+          pnpm eval $ARGS
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: report.json
+          if-no-files-found: ignore
+
+      - name: Upload updated baseline
+        if: github.event.inputs.update-baseline == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline
+          path: evals/baseline.json
+          if-no-files-found: error
