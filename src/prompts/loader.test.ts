@@ -43,7 +43,7 @@ describe("prompts/loader", () => {
   });
 
   it("exposes versioned constants", () => {
-    expect(EXTRACTION_PROMPT_VERSION).toBe("v2");
+    expect(EXTRACTION_PROMPT_VERSION).toBe("v3");
     expect(CONTEXTUALIZER_PROMPT_VERSION).toBe("v1");
     expect(CONFLICT_DETECTOR_PROMPT_VERSION).toBe("v1");
     expect(TEMPORAL_PARSER_PROMPT_VERSION).toBe("v1");

@@ -84,7 +84,7 @@ export interface ExtractDeps {
   maxTokens?: number;
 }
 
-const SYSTEM_TEMPLATE = loadPrompt("extraction_v2");
+const SYSTEM_TEMPLATE = loadPrompt("extraction_v3");
 
 function isoDay(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -98,12 +98,45 @@ export async function extractMemories(
   const documentDate = args.documentDate ?? new Date();
   const system = format(SYSTEM_TEMPLATE, { document_date: isoDay(documentDate) });
 
+  const memories = await callAndParse(deps, system, userMessage, 0);
+
+  // Retry-on-empty: when the model returns [] for a chunk that clearly contains
+  // user-disclosed content, re-prompt at a slightly higher temperature with an
+  // instruction that pushes harder on extraction. Single retry, capped to chunks
+  // big enough to plausibly contain a memory. Reasoning models (MiniMax-M2.7,
+  // qwen2.5:7b) routinely under-extract on short single-message setups; this
+  // adds resilience without changing the prompt's behaviour on genuinely empty
+  // chunks.
+  if (memories.length === 0 && shouldRetryEmpty(args.chunkContent)) {
+    const retryUser = `${userMessage}\n\nThe chunk above contains user-disclosed information. Extract at least one memory unless the chunk is pure small talk, a question with no self-disclosure, or an unrelated assistant utterance. If you do find such genuinely empty content, return [].`;
+    const retried = await callAndParse(deps, system, retryUser, 0.4);
+    if (retried.length > 0) {
+      logger.debug({ chunkChars: args.chunkContent.length }, "extractor_retry_recovered");
+      return retried;
+    }
+  }
+
+  return memories;
+}
+
+const RETRY_MIN_CHUNK_CHARS = 30;
+
+function shouldRetryEmpty(chunkContent: string): boolean {
+  return chunkContent.trim().length >= RETRY_MIN_CHUNK_CHARS;
+}
+
+async function callAndParse(
+  deps: ExtractDeps,
+  system: string,
+  userMessage: string,
+  temperature: number,
+): Promise<ExtractedMemory[]> {
   const response = await deps.llm.createMessage({
     model: deps.model,
     system,
     messages: [{ role: "user", content: userMessage }],
     maxTokens: deps.maxTokens ?? 1024,
-    temperature: 0,
+    temperature,
   });
 
   const raw = responseText(response).trim();

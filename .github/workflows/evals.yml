@@ -57,15 +57,14 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
         run: pnpm db:reset
 
-      - name: Run evals
+      - name: Run evals (MiniMax baseline)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/memcore
           REDIS_URL: redis://localhost:6379/0
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
         run: |
           set -e
-          ARGS="-- --output report.json --grader llm"
+          ARGS="--output report.json --grader llm"
           if [ -n "${{ github.event.inputs.category }}" ]; then
             ARGS="$ARGS --category ${{ github.event.inputs.category }}"
           fi
@@ -74,7 +73,7 @@ jobs:
           else
             ARGS="$ARGS --baseline"
           fi
-          pnpm eval $ARGS
+          pnpm eval:minimax $ARGS
 
       - name: Upload report
         if: always()

@@ -29,7 +29,7 @@ export function format(template: string, vars: Record<string, string>): string {
   });
 }
 
-export const EXTRACTION_PROMPT_VERSION = "v2";
+export const EXTRACTION_PROMPT_VERSION = "v3";
 export const CONTEXTUALIZER_PROMPT_VERSION = "v1";
 export const CONFLICT_DETECTOR_PROMPT_VERSION = "v1";
 export const TEMPORAL_PARSER_PROMPT_VERSION = "v1";

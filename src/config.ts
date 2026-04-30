@@ -30,8 +30,9 @@ const SettingsSchema = z.object({
 
   // LLM endpoint. Same shape as the embedding overrides above — set this to
   // run extraction / conflict / grader against a local OpenAI-compatible
-  // server (Ollama on :11434, LMStudio on :1234, vLLM, etc.). Defaults to
-  // the public OpenAI base URL.
+  // server (Ollama on :11434, LMStudio on :1234, vLLM, etc.) or against a
+  // hosted OpenAI-compatible provider like MiniMax (https://api.minimaxi.chat/v1).
+  // Defaults to the public OpenAI base URL.
   llmBaseUrl: z.string().optional(),
 
   // Models
