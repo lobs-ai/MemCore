@@ -67,6 +67,14 @@ export interface IngestArgs {
   metadata?: Record<string, unknown>;
 }
 
+export interface IngestedMemory {
+  id: string;
+  content: string;
+  category: string;
+  status: string;
+  confidence: number;
+}
+
 export interface IngestResult {
   conversationId: string;
   ingestionStatus: string;
@@ -78,6 +86,14 @@ export interface IngestResult {
   memoriesSuperseded: number;
   /** Candidate memories the conflict detector classified as duplicates and skipped. */
   duplicatesSkipped: number;
+  /**
+   * Memory rows the pipeline inserted (excluding skipped duplicates). Order
+   * matches the order in which they were classified. Callers who need to
+   * reference the just-written rows (e.g. a typed-memory agent that wants the
+   * id back from `add({ extract: false })`) get them here without a follow-up
+   * query.
+   */
+  memories: IngestedMemory[];
 }
 
 export interface IngestDeps {
@@ -174,6 +190,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
         edgesWritten: 0,
         memoriesSuperseded: 0,
         duplicatesSkipped: 0,
+        memories: [],
       };
     });
   }
@@ -289,6 +306,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
           edgesWritten: 0,
           memoriesSuperseded: 0,
           duplicatesSkipped: 0,
+          memories: [],
         };
       }
     }
@@ -347,6 +365,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
     let edgesWritten = 0;
     let memoriesSuperseded = 0;
     let duplicatesSkipped = 0;
+    const insertedMemories: IngestedMemory[] = [];
     const supersededTargets = new Set<string>();
     const extractorModel = deps.extractor?.model ?? "none";
     for (let m = 0; m < flatMemories.length; m += 1) {
@@ -370,7 +389,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
         continue;
       }
 
-      const inserted = await tx<{ id: string }[]>`
+      const inserted = await tx<{ id: string; status: string }[]>`
         INSERT INTO memories (
           container_id, content, embedding, category, document_date,
           event_date, event_date_precision,
@@ -386,16 +405,24 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
           ${EXTRACTION_PROMPT_VERSION},
           ${extractorModel}
         )
-        RETURNING id
+        RETURNING id, status
       `;
-      const memoryId = inserted[0]?.id;
-      if (!memoryId) continue;
+      const insertedRow = inserted[0];
+      if (!insertedRow) continue;
+      const memoryId = insertedRow.id;
       await tx`
         INSERT INTO memory_chunks (memory_id, chunk_id, relevance)
         VALUES (${memoryId}, ${sourceChunkId}, ${1.0})
         ON CONFLICT (memory_id, chunk_id) DO NOTHING
       `;
       memoriesWritten += 1;
+      insertedMemories.push({
+        id: memoryId,
+        content: entry.memory.content,
+        category: entry.memory.category,
+        status: insertedRow.status,
+        confidence: entry.memory.confidence,
+      });
 
       if (decision?.targetId) {
         const relType = decisionToRelationship(decision.decision);
@@ -452,6 +479,7 @@ export async function ingest(deps: IngestDeps, args: IngestArgs): Promise<Ingest
       edgesWritten,
       memoriesSuperseded,
       duplicatesSkipped,
+      memories: insertedMemories,
     };
   });
 }

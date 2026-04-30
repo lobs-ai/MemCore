@@ -27,6 +27,11 @@ export interface MemoryHit {
   eventDatePrecision: string | null;
   promptVersion: string;
   extractorModel: string;
+  metadata: Record<string, unknown>;
+  useCount: number;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
   score: number;
   chunks: ChunkRef[];
 }
@@ -43,11 +48,19 @@ export interface ChunkRef {
   relevance: number;
 }
 
+export interface MemorySearchFilters {
+  /** Status whitelist. Default `["active"]`. Pass `[]` to disable. */
+  statuses?: string[];
+  categories?: string[];
+  metadata?: Record<string, unknown>;
+}
+
 export interface MemorySearchArgs {
   containerId: string;
   queryVector: number[];
   limit: number;
   includeChunks: boolean;
+  filters?: MemorySearchFilters;
 }
 
 interface MemorySearchRow {
@@ -62,6 +75,11 @@ interface MemorySearchRow {
   event_date_precision: string | null;
   prompt_version: string;
   extractor_model: string;
+  metadata: Record<string, unknown> | null;
+  use_count: number;
+  last_used_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
   distance: number;
 }
 
@@ -83,15 +101,27 @@ export async function vectorSearchMemories(
   args: MemorySearchArgs,
 ): Promise<MemoryHit[]> {
   const queryLiteral = vectorLiteral(args.queryVector);
+  const statuses = args.filters?.statuses ?? ["active"];
+  const categories = args.filters?.categories;
+  const metadata = args.filters?.metadata;
+
+  const statusClause = statuses.length > 0 ? sql`AND status IN ${sql(statuses)}` : sql``;
+  const categoryClause =
+    categories && categories.length > 0 ? sql`AND category IN ${sql(categories)}` : sql``;
+  const metadataClause = metadata ? sql`AND metadata @> ${sql.json(metadata as never)}` : sql``;
+
   const rows = await sql<MemorySearchRow[]>`
     SELECT
       id, content, category, status, version, confidence,
       document_date, event_date, event_date_precision,
-      prompt_version, extractor_model,
+      prompt_version, extractor_model, metadata,
+      use_count, last_used_at, created_at, updated_at,
       embedding <=> ${queryLiteral}::vector AS distance
     FROM memories
     WHERE container_id = ${args.containerId}
-      AND status = 'active'
+      ${statusClause}
+      ${categoryClause}
+      ${metadataClause}
       AND embedding IS NOT NULL
     ORDER BY embedding <=> ${queryLiteral}::vector ASC
     LIMIT ${args.limit}
@@ -141,6 +171,11 @@ export async function vectorSearchMemories(
     eventDatePrecision: row.event_date_precision,
     promptVersion: row.prompt_version,
     extractorModel: row.extractor_model,
+    metadata: (row.metadata ?? {}) as Record<string, unknown>,
+    useCount: row.use_count,
+    lastUsedAt: row.last_used_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
     score: Math.max(0, 1 - Number(row.distance)),
     chunks: chunkMap.get(row.id) ?? [],
   }));
@@ -160,7 +195,8 @@ export async function fetchMemoriesByIds(
     SELECT
       id, content, category, status, version, confidence,
       document_date, event_date, event_date_precision,
-      prompt_version, extractor_model
+      prompt_version, extractor_model, metadata,
+      use_count, last_used_at, created_at, updated_at
     FROM memories
     WHERE container_id = ${containerId} AND id IN ${sql(ids)}
   `;
@@ -178,6 +214,11 @@ export async function fetchMemoriesByIds(
       eventDatePrecision: row.event_date_precision,
       promptVersion: row.prompt_version,
       extractorModel: row.extractor_model,
+      metadata: (row.metadata ?? {}) as Record<string, unknown>,
+      useCount: row.use_count,
+      lastUsedAt: row.last_used_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     });
   }
   return out;

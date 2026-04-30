@@ -29,10 +29,17 @@ export interface KeywordHit {
   score: number;
 }
 
+export interface KeywordSearchFilters {
+  statuses?: string[];
+  categories?: string[];
+  metadata?: Record<string, unknown>;
+}
+
 export interface KeywordSearchArgs {
   containerId: string;
   query: string;
   limit: number;
+  filters?: KeywordSearchFilters;
 }
 
 interface KeywordSearchRow {
@@ -59,6 +66,15 @@ export async function keywordSearchMemories(
   // good baseline; tuning to OR / websearch_to_tsquery is a Phase 3.x knob if
   // recall complaints surface. Empty queries yield no rows (the query parser
   // will return an empty tsquery).
+  const statuses = args.filters?.statuses ?? ["active"];
+  const categories = args.filters?.categories;
+  const metadata = args.filters?.metadata;
+
+  const statusClause = statuses.length > 0 ? sql`AND status IN ${sql(statuses)}` : sql``;
+  const categoryClause =
+    categories && categories.length > 0 ? sql`AND category IN ${sql(categories)}` : sql``;
+  const metadataClause = metadata ? sql`AND metadata @> ${sql.json(metadata as never)}` : sql``;
+
   const rows = await sql<KeywordSearchRow[]>`
     SELECT
       id, content, category, status, version, confidence,
@@ -67,7 +83,9 @@ export async function keywordSearchMemories(
       ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', ${args.query})) AS rank
     FROM memories
     WHERE container_id = ${args.containerId}
-      AND status = 'active'
+      ${statusClause}
+      ${categoryClause}
+      ${metadataClause}
       AND to_tsvector('english', content) @@ plainto_tsquery('english', ${args.query})
     ORDER BY rank DESC
     LIMIT ${args.limit}

@@ -127,12 +127,17 @@ CREATE TABLE memories (
   confidence            REAL NOT NULL DEFAULT 1.0,
   prompt_version        TEXT NOT NULL,
   extractor_model       TEXT NOT NULL,
+  metadata              JSONB NOT NULL DEFAULT '{}'::jsonb,
+  use_count             INTEGER NOT NULL DEFAULT 0,
+  last_used_at          TIMESTAMPTZ,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX ix_memories_container_status ON memories(container_id, status);
 CREATE INDEX ix_memories_content_tsv ON memories USING GIN (to_tsvector('english', content));
 CREATE INDEX ix_memories_container_event_date ON memories(container_id, event_date);
+CREATE INDEX ix_memories_metadata ON memories USING GIN (metadata jsonb_path_ops);
+CREATE INDEX ix_memories_container_updated_at ON memories(container_id, updated_at DESC);
 
 CREATE TABLE memory_chunks (
   memory_id   UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,

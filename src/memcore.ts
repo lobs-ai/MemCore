@@ -34,6 +34,22 @@ import { OpenAIEmbedder } from "./llm/openai-embedder.js";
 import { OpenAILLMClient } from "./llm/openai-llm-client.js";
 import { StubEmbedder } from "./llm/stub-embedder.js";
 import { getLogger } from "./logging.js";
+import {
+  type MemoryCategory,
+  type MemoryRow,
+  type MemoryStatus,
+  type FindSimilarArgs as RepoFindSimilarArgs,
+  type ListMemoriesArgs as RepoListMemoriesArgs,
+  type SimilarMemoryHit,
+  archiveMemory,
+  findSimilarMemories,
+  getMemoryById,
+  insertMemory,
+  isMemoryCategory,
+  listMemories,
+  recordMemoryUse,
+  updateMemory,
+} from "./memories/repository.js";
 import { type ProfileRecord, generateProfile, getProfileByContainer } from "./profile/generator.js";
 import { isProfileRelevant } from "./profile/relevance.js";
 import { type RelatedMemory, expandGraph } from "./retrieval/graph-expander.js";
@@ -147,6 +163,71 @@ export interface AddArgs {
   externalId?: string;
   documentDate?: Date;
   metadata?: Record<string, unknown>;
+  /**
+   * When `false`, MemCore writes the supplied `content` as a single memory
+   * row verbatim — no chunking, no LLM extraction, no conflict detection.
+   * Use this when the caller already has the finished memory body (e.g. an
+   * agent's `memory_save` tool) and doesn't want it split into atoms.
+   *
+   * Required: `content` (one memory body), `category`. The returned
+   * `IngestResult.memories` contains exactly one row whose id the caller can
+   * adopt as a stable identifier.
+   *
+   * Defaults to `true` (the standard extraction pipeline).
+   */
+  extract?: boolean;
+  /**
+   * Memory category for the direct-add path (`extract: false`). Required in
+   * that case. Ignored when `extract` is `true` — extraction picks the
+   * category per memory.
+   */
+  category?: MemoryCategory;
+  /**
+   * Confidence (0..1) for the direct-add path. Defaults to 1.0.
+   */
+  confidence?: number;
+}
+
+export interface AddMemoryArgs {
+  containerTag: string;
+  content: string;
+  category: MemoryCategory;
+  metadata?: Record<string, unknown>;
+  documentDate?: Date | null;
+  eventDate?: Date | null;
+  eventDatePrecision?: string | null;
+  confidence?: number;
+}
+
+export interface ListMemoriesArgs {
+  containerTag: string;
+  filters?: {
+    metadata?: Record<string, unknown>;
+    status?: MemoryStatus | MemoryStatus[];
+    categories?: MemoryCategory[];
+  };
+  sort?: "recency" | "use_count" | "created_at";
+  limit?: number;
+  offset?: number;
+}
+
+export interface FindSimilarArgs {
+  containerTag: string;
+  content: string;
+  limit?: number;
+  threshold?: number;
+  statuses?: MemoryStatus[];
+}
+
+export interface UpdateMemoryArgs {
+  containerTag: string;
+  id: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+  category?: MemoryCategory;
+  eventDate?: Date | null;
+  eventDatePrecision?: string | null;
+  confidence?: number;
 }
 
 export interface SearchArgs {
@@ -179,6 +260,24 @@ export interface SearchArgs {
    * Pass false to skip the heuristic and never inject the profile.
    */
   includeProfile?: boolean;
+  /**
+   * Server-side filters applied to the candidate pool before rerank.
+   * `metadata` is a JSONB containment filter (`@>`), `status` restricts to
+   * the given lifecycle states (default `["active"]`), `categories` whitelists
+   * memory categories. Use these to support typed-memory queries like "all
+   * active feedback memories tagged team=growth" without overfetching.
+   */
+  filters?: {
+    metadata?: Record<string, unknown>;
+    status?: MemoryStatus | MemoryStatus[];
+    categories?: MemoryCategory[];
+  };
+  /**
+   * When true (the default), MemCore bumps `use_count` and `last_used_at` on
+   * every memory it returns. Set false for read-only inspection paths that
+   * shouldn't influence usage stats.
+   */
+  recordUse?: boolean;
 }
 
 export interface SearchProfileEnvelope {
@@ -350,6 +449,54 @@ export class MemCore {
       throw new ValidationError("provide only one of 'content' or 'messages'");
     }
 
+    // Direct-add path: caller already has a finished memory body and doesn't
+    // want extraction. Skip chunking, extraction, and conflict detection;
+    // write a single row and return it. The id in the returned `memories` is
+    // stable — callers can adopt it as their primary key.
+    if (args.extract === false) {
+      if (args.content == null) {
+        throw new ValidationError("'content' is required when extract:false");
+      }
+      if (!args.category) {
+        throw new ValidationError("'category' is required when extract:false");
+      }
+      if (!isMemoryCategory(args.category)) {
+        throw new ValidationError(`unknown category: ${args.category}`);
+      }
+      const embeddingResponse = await this.embedder.embed({ texts: [args.content] });
+      const vector = embeddingResponse.vectors[0];
+      if (!vector) throw new ValidationError("embedder returned no vector");
+      const inserted = await insertMemory(this.sql, {
+        containerTag: args.containerTag,
+        content: args.content,
+        embedding: vector,
+        category: args.category,
+        documentDate: args.documentDate ?? null,
+        confidence: args.confidence ?? 1.0,
+        metadata: args.metadata ?? {},
+        promptVersion: "manual",
+        extractorModel: "manual",
+      });
+      return {
+        conversationId: "",
+        ingestionStatus: "complete",
+        chunksWritten: 0,
+        memoriesWritten: 1,
+        edgesWritten: 0,
+        memoriesSuperseded: 0,
+        duplicatesSkipped: 0,
+        memories: [
+          {
+            id: inserted.id,
+            content: inserted.content,
+            category: inserted.category,
+            status: inserted.status,
+            confidence: inserted.confidence,
+          },
+        ],
+      };
+    }
+
     const ingestArgs: IngestArgs = {
       containerTag: args.containerTag,
       sourceType: args.sourceType ?? (args.messages ? "conversation" : "document"),
@@ -452,17 +599,32 @@ export class MemCore {
 
     const activeRange: DateRange | null = callerProvidedRange ?? parsedRange ?? null;
 
+    const filterStatuses = (() => {
+      const s = args.filters?.status;
+      if (!s) return undefined;
+      return Array.isArray(s) ? s : [s];
+    })();
+    const searchFilters = args.filters
+      ? {
+          ...(filterStatuses ? { statuses: filterStatuses } : {}),
+          ...(args.filters.categories ? { categories: args.filters.categories } : {}),
+          ...(args.filters.metadata ? { metadata: args.filters.metadata } : {}),
+        }
+      : undefined;
+
     const [vectorHits, keywordHits, profileRow] = await Promise.all([
       vectorSearchMemories(this.sql, {
         containerId,
         queryVector,
         limit: HYBRID_VECTOR_TOPK,
         includeChunks: false,
+        ...(searchFilters ? { filters: searchFilters } : {}),
       }),
       keywordSearchMemories(this.sql, {
         containerId,
         query: args.query,
         limit: HYBRID_KEYWORD_TOPK,
+        ...(searchFilters ? { filters: searchFilters } : {}),
       }),
       includeProfile && profileMatch.isRelevant
         ? getProfileByContainer(this.sql, containerId)
@@ -596,6 +758,15 @@ export class MemCore {
       topVectorSimilarity < this.abstainSimilarityFloor &&
       !profileMatch.isRelevant;
 
+    // Bump use_count + last_used_at on the rows we're about to return. Fire
+    // and forget — a tracking failure must not block the search response.
+    if ((args.recordUse ?? true) && !lowSimilarity && results.length > 0) {
+      const idsToBump = results.map((r) => r.memory.id);
+      recordMemoryUse(this.sql, args.containerTag, idsToBump).catch((err) => {
+        logger.warn({ err: err instanceof Error ? err.message : err }, "record_memory_use_failed");
+      });
+    }
+
     return {
       results: lowSimilarity ? [] : results,
       profile: profileEnvelope,
@@ -650,6 +821,111 @@ export class MemCore {
     `;
     if (!containerRow[0]) return null;
     return getProfileByContainer(this.sql, containerRow[0].id);
+  }
+
+  /**
+   * Fetch a single memory by id, scoped to a container. Returns `null` when
+   * the id doesn't exist or doesn't belong to that container.
+   */
+  async get(args: { containerTag: string; id: string }): Promise<MemoryRow | null> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    if (!args.id) throw new ValidationError("id is required");
+    return getMemoryById(this.sql, args.containerTag, args.id);
+  }
+
+  /**
+   * Return memories matching a filter. No query string — this is the eager-
+   * block / typed-memory-list path. Default sort is recency (most recently
+   * updated first), which is what an agent prompt usually wants.
+   */
+  async list(args: ListMemoriesArgs): Promise<MemoryRow[]> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    const repoArgs: RepoListMemoriesArgs = {
+      containerTag: args.containerTag,
+      ...(args.filters ? { filters: args.filters } : {}),
+      ...(args.sort ? { sort: args.sort } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.offset !== undefined ? { offset: args.offset } : {}),
+    };
+    return listMemories(this.sql, repoArgs);
+  }
+
+  /**
+   * Pre-write duplicate detection. Embeds the candidate content, runs vector
+   * search against the container's memories, and returns matches above the
+   * threshold without writing anything. Use this before calling
+   * `add({ extract: false })` if the caller wants to dedupe.
+   */
+  async findSimilar(args: FindSimilarArgs): Promise<SimilarMemoryHit[]> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    if (!args.content?.trim()) throw new ValidationError("content is required");
+    const embeddingResponse = await this.embedder.embed({ texts: [args.content] });
+    const vector = embeddingResponse.vectors[0];
+    if (!vector) throw new ValidationError("embedder returned no vector");
+    const repoArgs: RepoFindSimilarArgs = {
+      containerTag: args.containerTag,
+      embedding: vector,
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.threshold !== undefined ? { threshold: args.threshold } : {}),
+      ...(args.statuses ? { statuses: args.statuses } : {}),
+    };
+    return findSimilarMemories(this.sql, repoArgs);
+  }
+
+  /**
+   * Edit a single memory row. When `content` changes the row is re-embedded
+   * and `version` is bumped. Metadata-only edits leave the embedding alone.
+   * Throws `NotFoundError` when the id doesn't exist in the container.
+   */
+  async update(args: UpdateMemoryArgs): Promise<MemoryRow> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    if (!args.id) throw new ValidationError("id is required");
+
+    let embedding: number[] | undefined;
+    if (args.content !== undefined) {
+      const embeddingResponse = await this.embedder.embed({ texts: [args.content] });
+      const vector = embeddingResponse.vectors[0];
+      if (!vector) throw new ValidationError("embedder returned no vector");
+      embedding = vector;
+    }
+    return updateMemory(this.sql, {
+      containerTag: args.containerTag,
+      id: args.id,
+      ...(args.content !== undefined ? { content: args.content } : {}),
+      ...(embedding ? { embedding } : {}),
+      ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+      ...(args.category !== undefined ? { category: args.category } : {}),
+      ...(args.eventDate !== undefined ? { eventDate: args.eventDate } : {}),
+      ...(args.eventDatePrecision !== undefined
+        ? { eventDatePrecision: args.eventDatePrecision }
+        : {}),
+      ...(args.confidence !== undefined ? { confidence: args.confidence } : {}),
+    });
+  }
+
+  /**
+   * Soft-archive a memory: flips `status` to `archived`. Removed from search
+   * results but the row is retained for audit. Throws `NotFoundError` when
+   * the id doesn't exist in the container.
+   */
+  async archive(args: { containerTag: string; id: string }): Promise<MemoryRow> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    if (!args.id) throw new ValidationError("id is required");
+    return archiveMemory(this.sql, args.containerTag, args.id);
+  }
+
+  /**
+   * Bump `use_count` and stamp `last_used_at` for the given memory id(s).
+   * Called automatically by `search()` for returned hits unless the caller
+   * passes `recordUse: false`. Useful for callers who consume memories
+   * outside the search path (e.g. a system-prompt eager block) and still
+   * want usage stats to reflect actual use.
+   */
+  async recordUse(args: { containerTag: string; ids: string | string[] }): Promise<void> {
+    if (!args.containerTag) throw new ValidationError("containerTag is required");
+    const ids = Array.isArray(args.ids) ? args.ids : [args.ids];
+    if (ids.length === 0) return;
+    await recordMemoryUse(this.sql, args.containerTag, ids);
   }
 
   /** Health check. Resolves with `true` when the database is reachable. */

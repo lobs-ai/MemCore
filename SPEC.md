@@ -346,30 +346,52 @@ Search memories.
 
 ### `GET /v1/memories/:id`
 
-Fetch a single memory with its source chunks and edges.
+Fetch a single memory by id (query string `container_tag=...`).
+
+### `GET /v1/memories`
+
+List memories matching a filter. Query params: `container_tag` (required), `status`, `categories`, `metadata` (JSON-encoded), `sort` (`recency` / `use_count` / `created_at`), `limit`, `offset`. No query string — this is the eager-block / typed-memory listing path.
 
 ### `PATCH /v1/memories/:id`
 
-Update memory metadata (status, etc.). Cannot edit `content` directly — use the conflict detection path.
+Partial update. `content` edits re-embed and bump `version`; metadata-only edits leave the embedding alone. Body fields: `container_tag`, `content`, `category`, `metadata`, `event_date`, `event_date_precision`, `confidence`.
 
 ### `DELETE /v1/memories/:id`
 
-Mark a memory as deleted (soft delete). Set `status = 'deleted'`. Removed from search results but retained for audit.
+Soft archive: sets `status = 'archived'`. Removed from search results but the row is retained.
 
 ### `POST /v1/memories`
 
-Manually create a memory. Used for the explicit `save_memory` tool path.
+Direct create — bypasses chunking, extraction, and conflict detection. Used for typed-memory callers that already have a finished body.
 
 ```json
 {
   "container_tag": "user_123",
   "content": "User is allergic to peanuts",
   "category": "constraint",
-  "source": "user_explicit"
+  "metadata": { "type": "constraint", "source": "user_explicit" }
 }
 ```
 
-This bypasses chunking and extraction but still runs through conflict detection.
+Returns the inserted row (with its `id`); the caller can adopt that id as a stable primary key.
+
+### `POST /v1/memories/find-similar`
+
+Pre-write duplicate detection. Embeds the supplied content, runs vector search against the container's memories, returns ranked matches above the threshold without writing anything.
+
+```json
+{
+  "container_tag": "user_123",
+  "content": "User is allergic to peanuts",
+  "limit": 5,
+  "threshold": 0.85,
+  "statuses": ["active"]
+}
+```
+
+### `POST /v1/memories/record-use`
+
+Bump `use_count` and stamp `last_used_at` for one or more ids. `search()` does this automatically for returned hits unless `record_use: false` is set; this endpoint exists for callers that consume memories outside the search path (e.g. an injected eager block).
 
 ### `GET /v1/conversations/:id`
 
@@ -576,3 +598,9 @@ This spec follows semantic versioning. Major version increments on breaking API 
 ## Changelog
 
 - **0.1.0** (initial): Schema, API, and pipeline defined for Phase 1–2 scope.
+- **0.2.0**: Typed-memory contract for callers that drive memory CRUD directly (e.g. an agent's `memory_save`/`memory_update` tools).
+  - Schema: `memories.metadata JSONB`, `memories.use_count INT`, `memories.last_used_at TIMESTAMPTZ`. New `ix_memories_metadata` (GIN, jsonb_path_ops) and `ix_memories_container_updated_at` indexes.
+  - SDK: `MemCore.get`, `MemCore.list`, `MemCore.findSimilar`, `MemCore.update`, `MemCore.archive`, `MemCore.recordUse`. `add({ extract: false, category, ... })` writes a single row verbatim and returns its id under `IngestResult.memories`.
+  - `search({ filters: { metadata, status, categories } })` pushes filters into the candidate-generation SQL. `search` now records use of returned hits unless `recordUse: false` is set.
+  - HTTP: `GET/POST/PATCH/DELETE /v1/memories`, `POST /v1/memories/find-similar`, `POST /v1/memories/record-use`.
+  - SPEC change: `PATCH /v1/memories/:id` now accepts content edits (previously forbidden). Re-embedding and version bumps happen server-side.

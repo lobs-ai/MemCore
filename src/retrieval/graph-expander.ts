@@ -51,6 +51,11 @@ interface EdgeRow {
   event_date_precision: string | null;
   prompt_version: string;
   extractor_model: string;
+  metadata: Record<string, unknown> | null;
+  use_count: number;
+  last_used_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
 }
 
 /**
@@ -74,7 +79,8 @@ export async function expandGraph(
       e.confidence AS edge_confidence,
       m.id, m.content, m.category, m.status, m.version, m.confidence,
       m.document_date, m.event_date, m.event_date_precision,
-      m.prompt_version, m.extractor_model
+      m.prompt_version, m.extractor_model, m.metadata,
+      m.use_count, m.last_used_at, m.created_at, m.updated_at
     FROM edges e
     JOIN memories m
       ON m.id = CASE
@@ -108,6 +114,11 @@ export async function expandGraph(
         eventDatePrecision: row.event_date_precision,
         promptVersion: row.prompt_version,
         extractorModel: row.extractor_model,
+        metadata: (row.metadata ?? {}) as Record<string, unknown>,
+        useCount: row.use_count,
+        lastUsedAt: row.last_used_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
       },
       edgeType: row.relationship_type,
       direction,

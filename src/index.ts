@@ -20,11 +20,21 @@ export { VERSION } from "./version.js";
 export type {
   MemCoreOptions,
   AddArgs,
+  AddMemoryArgs,
   SearchArgs,
   SearchResult,
   SearchResponse,
   SearchProfileEnvelope,
+  ListMemoriesArgs,
+  FindSimilarArgs,
+  UpdateMemoryArgs,
 } from "./memcore.js";
+export type {
+  MemoryRow,
+  MemoryStatus,
+  SimilarMemoryHit,
+} from "./memories/repository.js";
+export type { IngestedMemory, IngestResult } from "./ingestion/pipeline.js";
 
 // LLM-side surface so callers can plug their own embedder/LLM.
 export type { Embedder } from "./llm/embedder.js";
