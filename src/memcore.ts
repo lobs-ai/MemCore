@@ -35,7 +35,6 @@ import { OpenAILLMClient } from "./llm/openai-llm-client.js";
 import { StubEmbedder } from "./llm/stub-embedder.js";
 import { getLogger } from "./logging.js";
 import {
-  type MemoryCategory,
   type MemoryRow,
   type MemoryStatus,
   type FindSimilarArgs as RepoFindSimilarArgs,
@@ -45,7 +44,6 @@ import {
   findSimilarMemories,
   getMemoryById,
   insertMemory,
-  isMemoryCategory,
   listMemories,
   recordMemoryUse,
   updateMemory,
@@ -181,7 +179,7 @@ export interface AddArgs {
    * that case. Ignored when `extract` is `true` — extraction picks the
    * category per memory.
    */
-  category?: MemoryCategory;
+  category?: string;
   /**
    * Confidence (0..1) for the direct-add path. Defaults to 1.0.
    */
@@ -191,7 +189,7 @@ export interface AddArgs {
 export interface AddMemoryArgs {
   containerTag: string;
   content: string;
-  category: MemoryCategory;
+  category: string;
   metadata?: Record<string, unknown>;
   documentDate?: Date | null;
   eventDate?: Date | null;
@@ -204,7 +202,7 @@ export interface ListMemoriesArgs {
   filters?: {
     metadata?: Record<string, unknown>;
     status?: MemoryStatus | MemoryStatus[];
-    categories?: MemoryCategory[];
+    categories?: string[];
   };
   sort?: "recency" | "use_count" | "created_at";
   limit?: number;
@@ -224,7 +222,7 @@ export interface UpdateMemoryArgs {
   id: string;
   content?: string;
   metadata?: Record<string, unknown>;
-  category?: MemoryCategory;
+  category?: string;
   eventDate?: Date | null;
   eventDatePrecision?: string | null;
   confidence?: number;
@@ -270,7 +268,7 @@ export interface SearchArgs {
   filters?: {
     metadata?: Record<string, unknown>;
     status?: MemoryStatus | MemoryStatus[];
-    categories?: MemoryCategory[];
+    categories?: string[];
   };
   /**
    * When true (the default), MemCore bumps `use_count` and `last_used_at` on
@@ -459,9 +457,6 @@ export class MemCore {
       }
       if (!args.category) {
         throw new ValidationError("'category' is required when extract:false");
-      }
-      if (!isMemoryCategory(args.category)) {
-        throw new ValidationError(`unknown category: ${args.category}`);
       }
       const embeddingResponse = await this.embedder.embed({ texts: [args.content] });
       const vector = embeddingResponse.vectors[0];

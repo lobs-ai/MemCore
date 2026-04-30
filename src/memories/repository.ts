@@ -135,7 +135,7 @@ export interface InsertMemoryArgs {
   containerTag: string;
   content: string;
   embedding: number[];
-  category: MemoryCategory;
+  category: string;
   documentDate?: Date | null;
   eventDate?: Date | null;
   eventDatePrecision?: string | null;
@@ -206,7 +206,7 @@ export interface ListMemoriesArgs {
   filters?: {
     metadata?: Record<string, unknown>;
     status?: MemoryStatus | MemoryStatus[];
-    categories?: MemoryCategory[];
+    categories?: string[];
   };
   /** Default `recency`. */
   sort?: "recency" | "use_count" | "created_at";
@@ -275,7 +275,7 @@ export interface UpdateMemoryArgs {
   embedding?: number[];
   /** When set, *replaces* the metadata blob. Use a merged object if you want a partial update. */
   metadata?: Record<string, unknown>;
-  category?: MemoryCategory;
+  category?: string;
   eventDate?: Date | null;
   eventDatePrecision?: string | null;
   confidence?: number;

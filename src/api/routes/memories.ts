@@ -9,15 +9,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-const Category = z.enum([
-  "preference",
-  "fact",
-  "goal",
-  "event",
-  "relationship",
-  "constraint",
-  "opinion",
-]);
+// Categories are caller-defined strings. The default extraction pipeline uses
+// a fixed set ("preference" / "fact" / ...), but typed-memory callers route on
+// their own values (e.g. "user" / "feedback" / "project"). Validation here is
+// minimal — non-empty, capped length — so the column does the routing work.
+const Category = z.string().min(1).max(64);
 
 const Status = z.enum(["active", "superseded", "deleted", "archived"]);
 
