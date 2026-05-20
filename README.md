@@ -217,4 +217,4 @@ We do not run database migrations during pre-production phases — the schema is
 
 ## License
 
-MIT.
+MIT — see [LICENSE](./LICENSE).
