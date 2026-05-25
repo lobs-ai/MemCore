@@ -8,9 +8,10 @@ name: Evals
 # pull the resulting branch, and merge the baseline.json change.
 
 on:
-  schedule:
-    # 07:00 UTC daily.
-    - cron: "0 7 * * *"
+  # Daily schedule disabled — run on demand via workflow_dispatch.
+  # schedule:
+  #   # 07:00 UTC daily.
+  #   - cron: "0 7 * * *"
   workflow_dispatch:
     inputs:
       update-baseline:
